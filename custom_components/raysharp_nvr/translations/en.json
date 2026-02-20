@@ -1,0 +1,118 @@
+{
+  "title": "RaySharp NVR",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to RaySharp NVR",
+        "description": "Enter the connection details for your RaySharp NVR.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate RaySharp NVR",
+        "description": "The credentials for your NVR are no longer valid. Please enter updated credentials.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the NVR. Please check the host and port.",
+      "invalid_auth": "Invalid authentication. Please check your username and password.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This NVR is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "RaySharp NVR Options",
+        "data": {
+          "scan_interval": "Update interval (seconds)",
+          "event_push_auto_configure": "Auto-configure NVR EventPush to Home Assistant",
+          "event_timeout": "Event sensor reset timeout (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "device_type": { "name": "Device Type" },
+      "firmware_version": { "name": "Firmware Version" },
+      "mac_address": { "name": "MAC Address" },
+      "total_channels": { "name": "Total Channels" },
+      "cloud_state": { "name": "Cloud State" },
+      "device_datetime": { "name": "Device Date/Time" },
+      "system_hw_version": { "name": "Hardware Version" },
+      "system_serial": { "name": "Serial Number" },
+      "system_model": { "name": "Model" },
+      "system_alarm_inputs": { "name": "Alarm Inputs" },
+      "system_alarm_outputs": { "name": "Alarm Outputs" },
+      "network_ip": { "name": "IP Address" },
+      "network_gateway": { "name": "Gateway" },
+      "record_overwrite": { "name": "Record Overwrite Strategy" },
+      "disk_capacity": { "name": "Disk Capacity" },
+      "disk_used": { "name": "Disk Used" },
+      "disk_free": { "name": "Disk Free" },
+      "disk_status": { "name": "Disk Status" },
+      "ai_faces_detected": { "name": "AI Faces Detected" },
+      "ai_plates_detected": { "name": "AI Plates Detected" },
+      "ai_cross_count_in": { "name": "AI Cross Count In" },
+      "ai_cross_count_out": { "name": "AI Cross Count Out" },
+      "ai_cross_count_in_channel": { "name": "AI Cross Count In" },
+      "ai_cross_count_out_channel": { "name": "AI Cross Count Out" },
+      "ai_face_stats_total": { "name": "AI Face Statistics Total" },
+      "ai_object_stats_person_total": { "name": "AI Person Count Total" },
+      "ai_object_stats_vehicle_total": { "name": "AI Vehicle Count Total" },
+      "event_push_status": { "name": "Event Push Status" },
+      "exception_alarm_status": { "name": "Exception Alarm Status" }
+    },
+    "binary_sensor": {
+      "nvr_connected": { "name": "NVR Connected" },
+      "nvr_armed": { "name": "NVR Armed" },
+      "channel_online": { "name": "Online" },
+      "channel_videoloss": { "name": "Video Loss" },
+      "motion_detected": { "name": "Motion" },
+      "person_detected": { "name": "Person Detected" },
+      "vehicle_detected": { "name": "Vehicle Detected" },
+      "line_crossing": { "name": "Line Crossing" },
+      "intrusion": { "name": "Intrusion" },
+      "face_detected": { "name": "Face Detected" },
+      "plate_detected": { "name": "Plate Detected" },
+      "io_alarm": { "name": "IO Alarm" },
+      "stationary_object": { "name": "Stationary Object" },
+      "sound_detected": { "name": "Sound Detected" },
+      "wander_detected": { "name": "Wander Detected" },
+      "region_entrance": { "name": "Region Entrance" },
+      "region_exiting": { "name": "Region Exiting" },
+      "occlusion_detected": { "name": "Occlusion Detected" },
+      "pir_detected": { "name": "PIR Motion" },
+      "crowd_detected": { "name": "Crowd Detected" }
+    },
+    "switch": {
+      "alarm_disarming": { "name": "Alarm Disarming" },
+      "motion_alarm_recording": { "name": "Motion Recording" },
+      "fd_alarm": { "name": "Face Detection Recording" },
+      "lcd_alarm": { "name": "Line Crossing Recording" },
+      "pid_alarm": { "name": "Perimeter Intrusion Recording" }
+    },
+    "button": {
+      "reboot": { "name": "Reboot" }
+    },
+    "event": {
+      "nvr_alarm_event": { "name": "NVR Alarm" },
+      "channel_alarm_event": { "name": "Alarm" }
+    },
+    "image": {
+      "last_detection": { "name": "Last Detection" }
+    }
+  }
+}

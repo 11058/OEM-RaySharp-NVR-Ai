@@ -1,0 +1,8 @@
+{
+  "name": "RaySharp NVR",
+  "description": "Интеграция видеорегистраторов RaySharp в Home Assistant. Камеры (RTSP), AI-детекция (человек, транспорт, лицо, номера), история обнаружений с базами NVR, EventPush, снимки событий, PTZ.",
+  "render_readme": true,
+  "content_in_root": false,
+  "homeassistant": "2024.1.0",
+  "hide_default_branch": false
+}

@@ -1,0 +1,136 @@
+{
+  "title": "RaySharp NVR",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Подключение к RaySharp NVR",
+        "description": "Введите параметры подключения к видеорегистратору RaySharp.",
+        "data": {
+          "host": "Адрес",
+          "port": "Порт",
+          "username": "Пользователь",
+          "password": "Пароль"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Повторная авторизация RaySharp NVR",
+        "description": "Учётные данные устарели. Введите актуальный пароль.",
+        "data": {
+          "username": "Пользователь",
+          "password": "Пароль"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к NVR. Проверьте адрес и порт.",
+      "invalid_auth": "Неверные учётные данные. Проверьте имя пользователя и пароль.",
+      "unknown": "Произошла непредвиденная ошибка."
+    },
+    "abort": {
+      "already_configured": "Этот NVR уже настроен.",
+      "reauth_successful": "Повторная авторизация выполнена успешно."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки RaySharp NVR",
+        "data": {
+          "scan_interval": "Интервал опроса (секунды)",
+          "event_push_auto_configure": "Автоматически настраивать EventPush на Home Assistant",
+          "event_timeout": "Время сброса событийных сенсоров (секунды)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "device_type": { "name": "Тип устройства" },
+      "firmware_version": { "name": "Версия прошивки" },
+      "mac_address": { "name": "MAC-адрес" },
+      "total_channels": { "name": "Количество каналов" },
+      "cloud_state": { "name": "Облачное подключение" },
+      "device_datetime": { "name": "Дата и время устройства" },
+      "system_hw_version": { "name": "Версия оборудования" },
+      "system_serial": { "name": "Серийный номер" },
+      "system_model": { "name": "Модель" },
+      "system_alarm_inputs": { "name": "Входы тревоги" },
+      "system_alarm_outputs": { "name": "Выходы тревоги" },
+      "network_ip": { "name": "IP-адрес" },
+      "network_gateway": { "name": "Шлюз" },
+      "record_overwrite": { "name": "Перезапись записей" },
+      "disk_capacity": { "name": "Ёмкость диска" },
+      "disk_used": { "name": "Занято на диске" },
+      "disk_free": { "name": "Свободно на диске" },
+      "disk_status": { "name": "Статус диска" },
+      "ai_faces_detected": { "name": "Лиц обнаружено (AI)" },
+      "ai_plates_detected": { "name": "Номеров обнаружено (AI)" },
+      "ai_cross_count_in": { "name": "Пересечений (вход)" },
+      "ai_cross_count_out": { "name": "Пересечений (выход)" },
+      "ai_cross_count_in_channel": { "name": "Пересечений (вход)" },
+      "ai_cross_count_out_channel": { "name": "Пересечений (выход)" },
+      "ai_face_stats_total": { "name": "Всего лиц (AI)" },
+      "ai_object_stats_person_total": { "name": "Всего людей (AI)" },
+      "ai_object_stats_vehicle_total": { "name": "Всего машин (AI)" },
+      "event_push_status": { "name": "Статус EventPush" },
+      "exception_alarm_status": { "name": "Статус ошибок" }
+    },
+    "binary_sensor": {
+      "nvr_connected": { "name": "NVR подключён" },
+      "nvr_armed": { "name": "Охрана включена" },
+      "channel_online": { "name": "Онлайн" },
+      "channel_videoloss": { "name": "Потеря видео" },
+      "motion_detected": { "name": "Движение" },
+      "person_detected": { "name": "Человек" },
+      "vehicle_detected": { "name": "Транспорт" },
+      "line_crossing": { "name": "Пересечение линии" },
+      "intrusion": { "name": "Вторжение" },
+      "face_detected": { "name": "Лицо обнаружено" },
+      "plate_detected": { "name": "Номер обнаружен" },
+      "io_alarm": { "name": "Тревожный вход" },
+      "stationary_object": { "name": "Неподвижный объект" },
+      "sound_detected": { "name": "Звук обнаружен" },
+      "wander_detected": { "name": "Хождение" },
+      "region_entrance": { "name": "Вход в зону" },
+      "region_exiting": { "name": "Выход из зоны" },
+      "occlusion_detected": { "name": "Перекрытие камеры" },
+      "pir_detected": { "name": "PIR датчик" },
+      "crowd_detected": { "name": "Скопление людей" }
+    },
+    "switch": {
+      "alarm_disarming": { "name": "Снятие с охраны" },
+      "motion_alarm_recording": { "name": "Запись по движению" },
+      "fd_alarm": { "name": "Запись по лицу" },
+      "lcd_alarm": { "name": "Запись по пересечению" },
+      "pid_alarm": { "name": "Запись по вторжению" }
+    },
+    "button": {
+      "reboot": { "name": "Перезагрузка" }
+    },
+    "event": {
+      "nvr_alarm_event": { "name": "Тревога NVR" },
+      "channel_alarm_event": { "name": "Тревога" }
+    },
+    "image": {
+      "last_detection": { "name": "Последнее обнаружение" }
+    }
+  },
+  "services": {
+    "ptz_control": {
+      "name": "Управление PTZ",
+      "description": "Поворот/наклон/зум камеры."
+    },
+    "get_snapshot": {
+      "name": "Получить снимок",
+      "description": "Снять кадр с канала камеры."
+    },
+    "trigger_alarm_output": {
+      "name": "Активировать выход тревоги",
+      "description": "Включить или выключить физический выход тревоги."
+    },
+    "search_records": {
+      "name": "Поиск записей",
+      "description": "Найти видеозаписи на NVR за указанный период."
+    }
+  }
+}

@@ -1,0 +1,209 @@
+ptz_control:
+  name: PTZ Control
+  description: >
+    Control the Pan/Tilt/Zoom of an NVR camera channel. Sends a PTZ command
+    such as move, stop, zoom, or go to a preset position.
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: The config entry ID of the RaySharp NVR integration instance.
+      required: true
+      selector:
+        config_entry:
+          integration: raysharp_nvr
+    channel:
+      name: Channel Number
+      description: Camera channel number (1-based).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 64
+          mode: box
+    command:
+      name: PTZ Command
+      description: >
+        PTZ command to execute. Use "Stop" to stop current movement.
+      required: true
+      example: "Ptz_Cmd_Up"
+      selector:
+        select:
+          options:
+            - label: "Move Up"
+              value: "Ptz_Cmd_Up"
+            - label: "Move Down"
+              value: "Ptz_Cmd_Down"
+            - label: "Move Left"
+              value: "Ptz_Cmd_Left"
+            - label: "Move Right"
+              value: "Ptz_Cmd_Right"
+            - label: "Move Up-Left"
+              value: "Ptz_Cmd_UpLeft"
+            - label: "Move Up-Right"
+              value: "Ptz_Cmd_UpRight"
+            - label: "Move Down-Left"
+              value: "Ptz_Cmd_DownLeft"
+            - label: "Move Down-Right"
+              value: "Ptz_Cmd_DownRight"
+            - label: "Zoom In"
+              value: "Ptz_Cmd_ZoomAdd"
+            - label: "Zoom Out"
+              value: "Ptz_Cmd_ZoomDec"
+            - label: "Focus Add"
+              value: "Ptz_Cmd_FocusAdd"
+            - label: "Focus Dec"
+              value: "Ptz_Cmd_FocusDec"
+            - label: "Stop"
+              value: "Ptz_Cmd_Stop"
+            - label: "Go to Preset"
+              value: "Ptz_Cmd_GotoPreset"
+            - label: "Set Preset"
+              value: "Ptz_Cmd_SetPreset"
+            - label: "Clear Preset"
+              value: "Ptz_Cmd_ClearPreset"
+            - label: "Auto Focus"
+              value: "Ptz_Btn_AutoFocus"
+    state:
+      name: State
+      description: >
+        Action state. Use "Start" to begin movement (default) or
+        "Stop" to halt a running command.
+      required: false
+      example: "Start"
+      default: "Start"
+      selector:
+        select:
+          options:
+            - "Start"
+            - "Stop"
+    speed:
+      name: Speed
+      description: PTZ movement speed (1–100). Default is 50.
+      required: false
+      example: 50
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: slider
+    preset_num:
+      name: Preset Number
+      description: Preset position number to go to or set (1–255). Required when command is Go/Set Preset.
+      required: false
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: box
+
+get_snapshot:
+  name: Get Snapshot
+  description: >
+    Capture a JPEG snapshot from a camera channel. The snapshot is returned
+    as base64-encoded data and fired as a Home Assistant event
+    "raysharp_nvr_snapshot".
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: The config entry ID of the RaySharp NVR integration instance.
+      required: true
+      selector:
+        config_entry:
+          integration: raysharp_nvr
+    channel:
+      name: Channel Number
+      description: Camera channel number (1-based).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 64
+          mode: box
+
+trigger_alarm_output:
+  name: Trigger Alarm Output
+  description: >
+    Trigger (or release) a physical alarm output port on the NVR.
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: The config entry ID of the RaySharp NVR integration instance.
+      required: true
+      selector:
+        config_entry:
+          integration: raysharp_nvr
+    output_id:
+      name: Alarm Output ID
+      description: >
+        Alarm output identifier as used by the NVR API, e.g. "Local->1".
+      required: true
+      example: "Local->1"
+      selector:
+        text:
+    active:
+      name: Active
+      description: True to activate the output, False to deactivate.
+      required: false
+      default: true
+      selector:
+        boolean:
+
+search_records:
+  name: Search Records
+  description: >
+    Search for recorded video files on the NVR storage.
+    Results are fired as a Home Assistant event "raysharp_nvr_record_search_result".
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: The config entry ID of the RaySharp NVR integration instance.
+      required: true
+      selector:
+        config_entry:
+          integration: raysharp_nvr
+    channel:
+      name: Channel Number
+      description: Camera channel number (1-based, 0 for all channels).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 0
+          max: 64
+          mode: box
+    start_time:
+      name: Start Time
+      description: Search start time (ISO 8601 format or epoch timestamp).
+      required: true
+      example: "2024-01-01T00:00:00"
+      selector:
+        datetime:
+    end_time:
+      name: End Time
+      description: Search end time (ISO 8601 format or epoch timestamp).
+      required: true
+      example: "2024-01-01T23:59:59"
+      selector:
+        datetime:
+    record_type:
+      name: Record Type
+      description: Type of recording to search for.
+      required: false
+      default: "all"
+      selector:
+        select:
+          options:
+            - label: "All"
+              value: "all"
+            - label: "Motion"
+              value: "motion"
+            - label: "Manual"
+              value: "manual"
+            - label: "Alarm"
+              value: "alarm"
+            - label: "Continuous"
+              value: "continuous"
