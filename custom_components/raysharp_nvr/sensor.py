@@ -641,18 +641,33 @@ async def async_setup_entry(
 # ─── EventPush accumulator sensors (persistent storage) ───────────────────────
 
 def _grp_id_to_list_type(grp_id: Any) -> str:
-    """Convert NVR group policy code to a list-type key.
+    """Convert NVR face-group policy code to a list-type key.
 
-    NVR policy codes (face groups and plate groups share the same convention):
-      0 = Allow list (Разрешённые)
-      1 = Block list (Запрещённые)
-      2 = Stranger / Unknown
+    Face group Policy codes (0-based, from PlaceGroup/FaceGroup "policy" field):
+      0 = Allow list (Разрешённые / Белый список)
+      1 = Block list (Запрещённые / Черный список)
+      2 = Stranger / Unknown (Незнакомец / Неизвестно)
     """
     try:
         code = int(grp_id)
     except (TypeError, ValueError):
         return "unknown"
     return {0: "allowed", 1: "blocked", 2: "stranger"}.get(code, "known")
+
+
+def _plate_grp_id_to_list_type(grp_id: Any) -> str:
+    """Convert NVR plate GrpId (1-based) to a list-type key.
+
+    Plate GrpId values (NVR API PlateGroup.Id, 1-based):
+      1 = Белый список  (Allow list)
+      2 = Черный список (Block list)
+      3 = Неизвестно    (Stranger / Unknown)
+    """
+    try:
+        code = int(grp_id)
+    except (TypeError, ValueError):
+        return "unknown"
+    return {1: "allowed", 2: "blocked", 3: "stranger"}.get(code, "known")
 
 
 _LIST_TYPE_LABEL: dict[str, str] = {
@@ -824,7 +839,7 @@ class RaySharpPlatesTrackerSensor(_BaseTrackerSensor):
                 entry[field] = data[field]
         # Set list_type from grp_id if already known; otherwise enrich via API
         if "grp_id" in entry:
-            entry["list_type"] = _grp_id_to_list_type(entry["grp_id"])
+            entry["list_type"] = _plate_grp_id_to_list_type(entry["grp_id"])
             entry["list_type_label"] = _LIST_TYPE_LABEL.get(entry["list_type"], entry["list_type"])
         self._append_entry(entry)
         # Async DB enrichment to fill list_type / car_brand if not yet known
@@ -846,7 +861,7 @@ class RaySharpPlatesTrackerSensor(_BaseTrackerSensor):
                 entry.setdefault("owner", info.get("Owner", ""))
                 grp_id = info.get("GrpId")
                 entry["grp_id"] = grp_id
-                list_type = _grp_id_to_list_type(grp_id)
+                list_type = _plate_grp_id_to_list_type(grp_id)
             else:
                 list_type = "unknown"
         except (RaySharpNVRConnectionError, Exception):
