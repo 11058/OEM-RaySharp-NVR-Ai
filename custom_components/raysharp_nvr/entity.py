@@ -88,9 +88,16 @@ class RaySharpChannelEntity(RaySharpEntity):
                 model=model,
                 sw_version=fw_version,
             )
+        # Avoid "CH2 CH2" when NVR channel_name equals the channel identifier
+        name_part = self._channel_name.strip()
+        if name_part.upper() == f"CH{self._channel_num}":
+            name_part = ""
+        device_name = (
+            f"CH{self._channel_num} {name_part}" if name_part else f"CH{self._channel_num}"
+        )
         return DeviceInfo(
             identifiers={(DOMAIN, f"{mac}_ch{self._channel_num}")},
-            name=f"CH{self._channel_num} {self._channel_name}",
+            name=device_name,
             manufacturer=MANUFACTURER,
             via_device=(DOMAIN, mac),
         )

@@ -932,8 +932,37 @@ CLEAR_DETECTIONS_SERVICE_SCHEMA = vol.Schema(
 
 # ─── Integration lifecycle ────────────────────────────────────────────────────
 
+async def _async_migrate_image_entity_ids(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Remove spurious '_2' suffixes from image snapshot entity_ids.
+
+    When the unique_id format changed in v2.7.1, old image entities still
+    occupied the primary entity_ids, causing new entities to register as
+    'image.ch1_cam03_last_detection_2' etc.  Once the old entities are gone
+    the '_2' suffix is no longer needed; this migration renames them cleanly.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    for entity_entry in list(registry.entities.values()):
+        eid = entity_entry.entity_id
+        if (
+            entity_entry.config_entry_id == entry.entry_id
+            and eid.startswith("image.")
+            and (entity_entry.unique_id or "").endswith("_snapshot")
+            and eid.endswith("_2")
+        ):
+            target_id = eid[:-2]
+            if not registry.async_get(target_id):
+                registry.async_update_entity(eid, new_entity_id=target_id)
+                _LOGGER.info("Migrated image entity %s → %s", eid, target_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up RaySharp NVR from a config entry."""
+    await _async_migrate_image_entity_ids(hass, entry)
+
     client = RaySharpNVRClient(
         host=entry.data[CONF_HOST],
         port=entry.data[CONF_PORT],
