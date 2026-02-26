@@ -22,6 +22,7 @@ DEFAULT_EVENT_PUSH_AUTO_CONFIGURE = True
 API_LOGIN = "/API/Web/Login"
 API_LOGOUT = "/API/Web/Logout"
 API_HEARTBEAT = "/API/Login/Heartbeat"
+API_EVENT_CHECK = "/API/Event/Check"
 
 # ─── Device & Channel Info (Login-time) ───────────────────────────────────────
 API_DEVICE_INFO = "/API/Login/DeviceInfo/Get"
@@ -202,6 +203,7 @@ DATA_EVENT_PUSH_CONFIG = "event_push_config"
 # AI
 DATA_AI_FACES = "ai_faces"
 DATA_AI_PLATES = "ai_plates"
+DATA_AI_LPD_SETUP = "ai_lpd_setup"
 DATA_AI_CROSS_COUNTING = "ai_cross_counting"
 DATA_AI_CC_STATS = "ai_cc_stats"
 DATA_AI_HEATMAP_STATS = "ai_heatmap_stats"

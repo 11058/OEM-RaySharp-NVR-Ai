@@ -26,6 +26,7 @@ from .const import (
     API_AI_HEATMAP_STATS,
     API_AI_INTRUSION_SETUP,
     API_AI_LCD_SETUP,
+    API_AI_LPD_SETUP,
     API_AI_MODEL,
     API_AI_OBJECT_STATS,
     API_AI_PLATES,
@@ -58,6 +59,7 @@ from .const import (
     DATA_AI_HEATMAP_STATS,
     DATA_AI_INTRUSION_SETUP,
     DATA_AI_LCD_SETUP,
+    DATA_AI_LPD_SETUP,
     DATA_AI_MODEL,
     DATA_AI_OBJECT_STATS,
     DATA_AI_PLATES,
@@ -129,6 +131,7 @@ AI_SETUP_ENDPOINTS: dict[str, str] = {
     DATA_AI_PVD_SETUP: API_AI_PVD_SETUP,
     DATA_AI_LCD_SETUP: API_AI_LCD_SETUP,
     DATA_AI_INTRUSION_SETUP: API_AI_INTRUSION_SETUP,
+    DATA_AI_LPD_SETUP: API_AI_LPD_SETUP,  # LPD may 404 on older firmware — handled gracefully
 }
 _CHANNEL_CONFIG_PARAMS: dict[str, str] = {"page_type": "ChannelConfig"}
 
@@ -154,6 +157,10 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=scan_interval),
             config_entry=entry,
         )
+        self._event_check_task: asyncio.Task | None = None
+        self._event_check_reader_id: int | None = None
+        self._event_check_sequence: int | None = None
+        self._event_check_lap: int | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch all data from the NVR."""
@@ -265,3 +272,130 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(response, dict):
             return response.get("data", response)
         return response
+
+    # ── Event Check long-polling ──────────────────────────────────────────────
+
+    def async_start_event_check_loop(self) -> None:
+        """Start the NVR Event Check long-polling loop (idempotent)."""
+        if self._event_check_task and not self._event_check_task.done():
+            return
+        self._event_check_reader_id = None
+        self._event_check_sequence = None
+        self._event_check_lap = None
+        self._event_check_task = self.hass.async_create_background_task(
+            self._async_event_check_loop(),
+            "raysharp_nvr_event_check",
+        )
+        _LOGGER.debug("Started NVR Event Check long-polling task")
+
+    async def async_stop_event_check_loop(self) -> None:
+        """Stop the Event Check loop and await task teardown."""
+        task = self._event_check_task
+        self._event_check_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.shield(task)
+            except (asyncio.CancelledError, Exception):
+                pass
+        _LOGGER.debug("Stopped NVR Event Check long-polling task")
+
+    async def _async_event_check_loop(self) -> None:
+        """Continuously long-poll /API/Event/Check for real-time NVR events.
+
+        – On first call (reader_id=None) the NVR creates a subscription.
+        – Subsequent calls carry the reader_id + sequence to receive only new
+          events.  A "heat_alarm" response means no new events; the NVR already
+          blocked for its internal long-poll window before returning it.
+        – On transient errors (network, timeout) we keep reader_id and retry
+          after a short delay.  On auth errors we re-subscribe from scratch.
+        """
+        retry_delay = 5.0
+        consecutive_errors = 0
+
+        while True:
+            try:
+                response = await self.client.async_event_check(
+                    reader_id=self._event_check_reader_id,
+                    sequence=self._event_check_sequence,
+                    lap_number=self._event_check_lap,
+                )
+
+                # Empty response = OS-level timeout (no network data received).
+                # Keep existing reader_id / sequence and retry immediately.
+                if not response:
+                    await asyncio.sleep(1)
+                    continue
+
+                data = response.get("data", response) if isinstance(response, dict) else {}
+                if not isinstance(data, dict):
+                    data = {}
+
+                # Update subscription tracking
+                if "reader_id" in data:
+                    self._event_check_reader_id = data["reader_id"]
+                if "sequence" in data:
+                    self._event_check_sequence = data["sequence"]
+                if "lap_number" in data:
+                    self._event_check_lap = data["lap_number"]
+
+                # Dispatch events to HA bus when payload contains real events
+                has_alarm = "alarm_list" in data and data["alarm_list"]
+                has_snap = "ai_snap_picture" in data and data["ai_snap_picture"]
+                if has_alarm or has_snap:
+                    self._dispatch_event_check_data(response)
+
+                consecutive_errors = 0
+                retry_delay = 5.0
+                # Small yield to prevent tight CPU loops on instant NVR replies
+                await asyncio.sleep(0.2)
+
+            except asyncio.CancelledError:
+                _LOGGER.debug("Event Check loop cancelled")
+                break
+
+            except RaySharpNVRAuthError:
+                _LOGGER.debug("Event Check auth error — re-subscribing")
+                self._event_check_reader_id = None
+                self._event_check_sequence = None
+                self._event_check_lap = None
+                await asyncio.sleep(retry_delay)
+
+            except (RaySharpNVRConnectionError, Exception) as err:
+                consecutive_errors += 1
+                _LOGGER.debug(
+                    "Event Check error #%d: %s — retrying in %.0fs",
+                    consecutive_errors, err, retry_delay,
+                )
+                # Keep reader_id on transient errors so we don't re-subscribe
+                # unnecessarily; reset if we've been failing for a while.
+                if consecutive_errors >= 5:
+                    self._event_check_reader_id = None
+                    self._event_check_sequence = None
+                    self._event_check_lap = None
+                await asyncio.sleep(min(retry_delay, 60.0))
+                retry_delay = min(retry_delay * 1.5, 60.0)
+
+    def _dispatch_event_check_data(self, response: dict[str, Any]) -> None:
+        """Parse Event Check response and fire HA bus events.
+
+        Lazy-imports the parsing helpers from __init__ to avoid circular imports
+        at module load time.
+        """
+        try:
+            from . import _parse_alarm_payload, _parse_snapshot_payload  # noqa: PLC0415
+            from .const import EVENT_ALARM, EVENT_SNAPSHOT  # noqa: PLC0415
+        except ImportError:
+            _LOGGER.debug("Could not import event parsers — skipping dispatch")
+            return
+
+        for event_data in _parse_alarm_payload(response):
+            self.hass.bus.async_fire(EVENT_ALARM, event_data)
+
+        for snap in _parse_snapshot_payload(response):
+            self.hass.bus.async_fire(EVENT_SNAPSHOT, snap)
+            _LOGGER.debug(
+                "Event Check: fired %s snapshot for channel %s",
+                snap.get("alarm_type"),
+                snap.get("channel"),
+            )

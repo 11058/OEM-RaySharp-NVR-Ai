@@ -122,6 +122,9 @@ NVR_ALARM_TYPE_MAP: dict[str, str] = {
     "LPR": ALARM_TYPE_PLATE,
     "LicensePlate": ALARM_TYPE_PLATE,
     "LPD": ALARM_TYPE_PLATE,
+    "lpd": ALARM_TYPE_PLATE,
+    "lp": ALARM_TYPE_PLATE,
+    "LP": ALARM_TYPE_PLATE,
     # IO Alarm
     "io": ALARM_TYPE_IO,
     "IO": ALARM_TYPE_IO,
@@ -230,15 +233,34 @@ _AI_SNAP_TYPE_MAP: dict[int, str] = {
 }
 
 
+# Extra NVR field → HA snapshot key mapping for SnapedObjInfo entries
+_NVR_SNAP_FIELD_MAP: dict[str, str] = {
+    "PlateNum": "plate_number",
+    "FaceId": "face_id",
+    "Name": "face_name",       # matched face name (if NVR sends it)
+    "GrpId": "grp_id",         # group ID
+    "Similarity": "similarity", # face match confidence 0-100
+    "CarBrand": "car_brand",
+    "CarType": "car_type",
+    "CarColor": "car_color",
+    "CarNum": "plate_number",   # alternative plate field on some firmware
+}
+
+
 def _parse_snapshot_payload(payload: Any) -> list[dict[str, Any]]:
     """Parse NVR ai_snap_picture payload into snapshot event dicts.
 
-    NVR format:
-      {"data": {"ai_snap_picture": {"SnapedObjInfo": [
-        {"StrChn": "CH17", "Chn": 16, "Type": 1,
-         "ObjectImage": "<base64 JPEG>", "SnapId": 399,
-         "StartTime": 1771577417}
-      ]}}}
+    Handles three sub-arrays inside ai_snap_picture:
+      • SnapedObjInfo — person / vehicle / intrusion / line-crossing detections
+      • PlateInfo     — LPD license plate detections (Type=10 / GrpId 1-based)
+      • FaceInfo      — FD face detections / recognition results
+
+    NVR push format (EventPush webhook or Event Check response):
+      {"data": {"ai_snap_picture": {
+        "SnapedObjInfo": [...],
+        "PlateInfo": [...],
+        "FaceInfo": [...]
+      }}}
     """
     snapshots: list[dict[str, Any]] = []
     if not isinstance(payload, dict):
@@ -249,6 +271,8 @@ def _parse_snapshot_payload(payload: Any) -> list[dict[str, Any]]:
     ai_snap = data.get("ai_snap_picture")
     if not isinstance(ai_snap, dict):
         return snapshots
+
+    # ── SnapedObjInfo: person / vehicle / intrusion / line-crossing ──────────
     for item in ai_snap.get("SnapedObjInfo", []):
         if not isinstance(item, dict):
             continue
@@ -265,23 +289,71 @@ def _parse_snapshot_payload(payload: Any) -> list[dict[str, Any]]:
             "end_time": item.get("EndTime"),
             "image": item.get("ObjectImage", ""),
         }
-        # Map all extra NVR fields we might receive — more may appear depending
-        # on firmware; unknown keys are silently ignored.
-        _NVR_SNAP_FIELD_MAP = {
-            "PlateNum": "plate_number",
-            "FaceId": "face_id",
-            "Name": "face_name",       # matched face name (if NVR sends it)
-            "GrpId": "grp_id",         # group ID (0=allow, 1=block, 2=stranger)
-            "Similarity": "similarity", # face match confidence 0-100
-            "CarBrand": "car_brand",
-            "CarType": "car_type",
-            "CarColor": "car_color",
-            "CarNum": "plate_number",   # alternative plate field on some firmware
-        }
         for nvr_key, snap_key in _NVR_SNAP_FIELD_MAP.items():
             if nvr_key in item and snap_key not in snap:
                 snap[snap_key] = item[nvr_key]
         snapshots.append(snap)
+
+    # ── PlateInfo: License Plate Detection (LPD) ─────────────────────────────
+    # Fields: Id (plate text), GrpId (1=allow/2=block/3=stranger), Chn (0-based
+    # index), StrChn (e.g. "CH16"), PlateImg (plate crop), BgImg (background),
+    # CarBrand, CarType, CarColor, StartTime, EndTime, SnapId.
+    for item in ai_snap.get("PlateInfo", []):
+        if not isinstance(item, dict):
+            continue
+        ch_str = str(item.get("StrChn", item.get("Chn", "")))
+        channel = _channel_str_to_int(ch_str)
+        snap: dict[str, Any] = {
+            "channel": channel,
+            "channel_str": ch_str,
+            "alarm_type": ALARM_TYPE_PLATE,
+            "snap_id": item.get("SnapId"),
+            "start_time": item.get("StartTime"),
+            "end_time": item.get("EndTime"),
+            "plate_number": item.get("Id", ""),
+            "grp_id": item.get("GrpId"),
+            "car_brand": item.get("CarBrand", ""),
+            "car_type": item.get("CarType", ""),
+            "car_color": item.get("CarColor", ""),
+            # BgImg shows the vehicle in context; PlateImg is the plate crop.
+            # Prefer BgImg for the image entity (more informative).
+            "image": item.get("BgImg", item.get("PlateImg", "")),
+        }
+        _LOGGER.debug(
+            "LPD snapshot: channel=%s plate=%s grp=%s",
+            channel, snap["plate_number"], snap["grp_id"],
+        )
+        snapshots.append(snap)
+
+    # ── FaceInfo: Face Detection / Recognition ────────────────────────────────
+    # Fields: Id (face id), GrpId (0=allow/1=block/2=stranger for faces),
+    # Chn (0-based), StrChn, Score (similarity 0-100), Image2 (captured face),
+    # Image4 (background), Name (matched name), Sex, Age, StartTime, EndTime.
+    for item in ai_snap.get("FaceInfo", []):
+        if not isinstance(item, dict):
+            continue
+        ch_str = str(item.get("StrChn", item.get("Chn", "")))
+        channel = _channel_str_to_int(ch_str)
+        snap: dict[str, Any] = {
+            "channel": channel,
+            "channel_str": ch_str,
+            "alarm_type": ALARM_TYPE_FACE,
+            "snap_id": item.get("SnapId"),
+            "start_time": item.get("StartTime"),
+            "end_time": item.get("EndTime"),
+            "face_id": item.get("Id"),
+            "grp_id": item.get("GrpId"),
+            "similarity": item.get("Score"),
+            "face_name": item.get("Name", ""),
+            # Image2 = captured face crop; Image4 = full background frame.
+            "image": item.get("Image2", item.get("Image4", "")),
+        }
+        _LOGGER.debug(
+            "FD snapshot: channel=%s face_id=%s grp=%s score=%s",
+            channel, snap["face_id"], snap["grp_id"], snap["similarity"],
+        )
+        snapshots.append(snap)
+
     return snapshots
 
 
@@ -411,22 +483,26 @@ async def _async_configure_event_push(
 
     _LOGGER.info(
         "EventPush webhook URL (use this in NVR Push-events settings): "
-        "http://%s:%s%s  |  addr=%s port=%s url=%s",
-        ha_host, ha_port, webhook_path,
+        "http://%s:%s%s",
         ha_host, ha_port, webhook_path,
     )
 
-    # Flat payload — the NVR EventPush Set endpoint expects configuration
-    # fields directly in the data dict (no params/table nesting).
+    # NVR EventPush Set uses the same nested params.table structure as Get.
+    # Field "method" (not "push_method") mirrors what the NVR returns on Get.
     push_config = {
-        "addr": ha_host,
-        "port": ha_port,
-        "url": webhook_path,
-        "enable": True,
-        "name": "HA",
-        "push_method": "POST",
-        "auth_enable": False,
-        "interval": 0,
+        "params": {
+            "name": "HA",
+            "table": {
+                "addr": ha_host,
+                "port": ha_port,
+                "url": webhook_path,
+                "enable": True,
+                "method": "POST",
+                "auth_enable": False,
+                "keep_alive_interval": "0",
+                "push_way": "HTTP",
+            },
+        }
     }
 
     try:
@@ -612,11 +688,14 @@ async def _async_handle_search_plates(
     plate_filter = call.data.get("plate_numbers", [])
     max_results = call.data.get("max_results", 100)
 
+    # NVR SearchPlate uses 0-based channel indexing (CH16 → Chn=15).
+    # All-channel search (Chn=[]) may return "no_permission" on some firmware;
+    # per-channel search always works.
     search_payload: dict[str, Any] = {
         "MsgId": None,
         "StartTime": start_time,
         "EndTime": end_time,
-        "Chn": [channel] if channel > 0 else [],
+        "Chn": [channel - 1] if channel > 0 else [],
         "SortType": 1,
         "Engine": 0,
     }
@@ -698,11 +777,12 @@ async def _async_handle_search_faces(
     matched_only = call.data.get("matched_only", False)
     max_results = call.data.get("max_results", 100)
 
+    # NVR SnapedFaces/Search uses 0-based channel indexing (CH17 → Chn=16).
     search_payload: dict[str, Any] = {
         "MsgId": None,
         "StartTime": start_time,
         "EndTime": end_time,
-        "Chn": [channel] if channel > 0 else [],
+        "Chn": [channel - 1] if channel > 0 else [],
         "Similarity": -1,
         "Engine": 0,
         "Count": 0,
@@ -988,6 +1068,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    # Start Event Check long-polling loop for real-time events (plates, faces…)
+    coordinator.async_start_event_check_loop()
+    entry.async_on_unload(coordinator.async_stop_event_check_loop)
 
     # Auto-configure NVR EventPush if enabled
     if entry.options.get(CONF_EVENT_PUSH_AUTO_CONFIGURE, DEFAULT_EVENT_PUSH_AUTO_CONFIGURE):

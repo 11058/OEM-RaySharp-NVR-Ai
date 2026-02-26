@@ -38,6 +38,7 @@ from .const import (
     DATA_AI_FD_SETUP,
     DATA_AI_INTRUSION_SETUP,
     DATA_AI_LCD_SETUP,
+    DATA_AI_LPD_SETUP,
     DATA_AI_PVD_SETUP,
     DATA_CHANNEL_INFO,
     DATA_DEVICE_INFO,
@@ -133,8 +134,9 @@ def _get_detection_enabled(
     if alarm_type == ALARM_TYPE_FACE:
         return _ch_switch(DATA_AI_FD_SETUP)
     if alarm_type == ALARM_TYPE_PLATE:
-        # LPR shares the face detection pipeline
-        return _ch_switch(DATA_AI_FD_SETUP)
+        # Try dedicated LPD setup first; fall back to FD setup if LPD returns 404
+        lpd = _ch_switch(DATA_AI_LPD_SETUP)
+        return lpd if lpd is not None else _ch_switch(DATA_AI_FD_SETUP)
     if alarm_type == ALARM_TYPE_LINE_CROSSING:
         return _ch_switch(DATA_AI_LCD_SETUP)
     if alarm_type == ALARM_TYPE_INTRUSION:
