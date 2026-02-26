@@ -208,6 +208,10 @@ async def _handle_webhook(
 
     _LOGGER.debug("Received NVR EventPush webhook: %s", payload)
 
+    # Log plate/face events at INFO level so they appear without debug mode,
+    # and write the raw payload to a debug file for format verification.
+    _webhook_log_interesting(payload)
+
     # Handle AI snapshot events separately
     snapshots = _parse_snapshot_payload(payload)
     for snap in snapshots:
@@ -220,6 +224,95 @@ async def _handle_webhook(
         hass.bus.async_fire(EVENT_ALARM, event_data)
 
     return web.Response(text="OK", status=200)
+
+
+def _webhook_log_interesting(payload: Any) -> None:
+    """Log plate/face webhook events at INFO level and append to debug file.
+
+    Writes the raw NVR payload to /config/nvr_webhook_debug.json (appending
+    up to 50 entries) whenever the webhook contains plate or face data.
+    Removed once the format is confirmed working.
+    """
+    if not isinstance(payload, dict):
+        return
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return
+    ai_snap = data.get("ai_snap_picture", {})
+    if not isinstance(ai_snap, dict):
+        ai_snap = {}
+    plates = ai_snap.get("PlateInfo", [])
+    faces = ai_snap.get("FaceInfo", [])
+    alarm_list = data.get("alarm_list", [])
+
+    if plates:
+        _LOGGER.info(
+            "NVR EventPush: %d plate(s) in ai_snap_picture.PlateInfo — %s",
+            len(plates),
+            [{"ch": p.get("StrChn"), "plate": p.get("Id"), "grp": p.get("GrpId")} for p in plates if isinstance(p, dict)],
+        )
+    if faces:
+        _LOGGER.info(
+            "NVR EventPush: %d face(s) in ai_snap_picture.FaceInfo",
+            len(faces),
+        )
+
+    # Log alarm_list entries that look plate/face related
+    if isinstance(alarm_list, list):
+        for entry in alarm_list:
+            for ch_alarm in (entry.get("channel_alarm", []) if isinstance(entry, dict) else []):
+                subtype = (ch_alarm.get("int_alarm", {}) or {}).get("int_subtype", "")
+                if subtype and any(k in subtype.lower() for k in ("lp", "lpr", "plate", "fd", "face")):
+                    _LOGGER.info(
+                        "NVR EventPush alarm_list: channel=%s int_subtype=%s",
+                        ch_alarm.get("channel"), subtype,
+                    )
+
+    # Write raw payload to debug file when it contains something interesting
+    if plates or faces or (
+        isinstance(alarm_list, list) and any(
+            any(
+                any(k in str((ca.get("int_alarm") or {}).get("int_subtype", "")).lower()
+                    for k in ("lp", "lpr", "plate", "fd", "face"))
+                for ca in (e.get("channel_alarm", []) if isinstance(e, dict) else [])
+            )
+            for e in alarm_list
+        )
+    ):
+        import json as _json
+        import os as _os
+        debug_path = "/config/nvr_plate_face_debug.json"
+        try:
+            existing: list = []
+            if _os.path.exists(debug_path):
+                with open(debug_path) as f:
+                    existing = _json.load(f)
+            if not isinstance(existing, list):
+                existing = []
+            # Strip base64 images to keep file small
+            stripped = _json.loads(_json.dumps(payload))
+            _strip_images(stripped)
+            existing.append(stripped)
+            # Keep only last 50 entries
+            if len(existing) > 50:
+                existing = existing[-50:]
+            with open(debug_path, "w") as f:
+                _json.dump(existing, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            _LOGGER.debug("Failed to write plate/face debug file: %s", exc)
+
+
+def _strip_images(obj: Any) -> None:
+    """Recursively remove base64 image fields to keep debug files small."""
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            if key in ("ObjectImage", "BgImg", "PlateImg", "Image2", "Image4", "FaceImage"):
+                obj[key] = "<base64_stripped>"
+            else:
+                _strip_images(obj[key])
+    elif isinstance(obj, list):
+        for item in obj:
+            _strip_images(item)
 
 
 # AI detection Type codes from NVR ai_snap_picture payload
