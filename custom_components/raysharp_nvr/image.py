@@ -77,7 +77,12 @@ def _get_channel_list(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _parse_ts_to_dt(ts: Any) -> datetime | None:
-    """Convert a NVR timestamp (string or numeric) to an aware datetime."""
+    """Convert a NVR timestamp to an aware UTC datetime.
+
+    NVR timestamps are in local (device) time — the same timezone as HA is
+    configured for.  We therefore interpret the naive string as the HA local
+    timezone and convert to UTC so HA displays the correct local time.
+    """
     if ts is None:
         return None
     if isinstance(ts, (int, float)):
@@ -86,10 +91,10 @@ def _parse_ts_to_dt(ts: Any) -> datetime | None:
         except (ValueError, OSError):
             return None
     try:
-        return datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=dt_util.UTC
-        )
-    except ValueError:
+        naive_dt = datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
+        # Localise as HA timezone → convert to UTC
+        return dt_util.as_utc(naive_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE))
+    except (ValueError, AttributeError):
         pass
     return dt_util.parse_datetime(str(ts))
 
@@ -318,13 +323,18 @@ class SnapshotHistoryStore:
         if entry.snap_id is None or entry.timestamp is None:
             return None
 
-        dt = _parse_ts_to_dt(entry.timestamp)
-        if dt is None:
+        # Parse as naive local time — NVR API expects local time strings.
+        try:
+            naive_dt = datetime.strptime(str(entry.timestamp), "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
             return None
 
-        start_str = (dt - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
-        end_str = (dt + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+        start_str = (naive_dt - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+        end_str = (naive_dt + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
         ch_0 = self._channel_num - 1  # NVR GetByIndex uses 0-based channel index
+        # Normalise snap_id to string for type-safe comparison (NVR may return int
+        # while JSON storage may deserialise it differently).
+        snap_id_str = str(entry.snap_id)
 
         try:
             if self._alarm_type == ALARM_TYPE_PLATE:
@@ -333,7 +343,7 @@ class SnapshotHistoryStore:
                     {"Chn": [ch_0], "StartTime": start_str, "EndTime": end_str},
                 )
                 for item in _extract_list(resp, "PlateInfo"):
-                    if item.get("SnapId") == entry.snap_id:
+                    if str(item.get("SnapId", "")) == snap_id_str:
                         img = item.get("BgImg") or item.get("PlateImg")
                         if img:
                             return base64.b64decode(img)
@@ -344,7 +354,7 @@ class SnapshotHistoryStore:
                     {"Chn": [ch_0], "StartTime": start_str, "EndTime": end_str},
                 )
                 for item in _extract_list(resp, "SnapedFaceInfo"):
-                    if item.get("SnapId") == entry.snap_id:
+                    if str(item.get("SnapId", "")) == snap_id_str:
                         img = (
                             item.get("FaceImage")
                             or item.get("Image2")
@@ -359,7 +369,7 @@ class SnapshotHistoryStore:
                     {"Chn": [ch_0], "StartTime": start_str, "EndTime": end_str},
                 )
                 for item in _extract_list(resp, "SnapedObjInfo"):
-                    if item.get("SnapId") == entry.snap_id:
+                    if str(item.get("SnapId", "")) == snap_id_str:
                         img = item.get("ObjectImage")
                         if img:
                             return base64.b64decode(img)

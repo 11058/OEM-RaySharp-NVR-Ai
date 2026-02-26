@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -161,6 +162,10 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._event_check_reader_id: int | None = None
         self._event_check_sequence: int | None = None
         self._event_check_lap: int | None = None
+        # Deduplication: suppress repeated identical alarms from Event Check polling.
+        # Key: (channel, alarm_type) → monotonic timestamp of last dispatch.
+        self._alarm_debounce: dict[tuple[int, str], float] = {}
+        self._alarm_debounce_window: float = 10.0  # seconds
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch all data from the NVR."""
@@ -391,7 +396,12 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Could not import event parsers — skipping dispatch")
             return
 
+        now = time.monotonic()
         for event_data in _parse_alarm_payload(response):
+            key = (event_data.get("channel", 0), event_data.get("alarm_type", ""))
+            if now - self._alarm_debounce.get(key, 0.0) < self._alarm_debounce_window:
+                continue
+            self._alarm_debounce[key] = now
             self.hass.bus.async_fire(EVENT_ALARM, event_data)
 
         for snap in _parse_snapshot_payload(response):
