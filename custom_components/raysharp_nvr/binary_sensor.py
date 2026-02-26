@@ -35,11 +35,6 @@ from .const import (
     ALARM_TYPE_VEHICLE,
     ALARM_TYPE_WANDER,
     CONF_EVENT_TIMEOUT,
-    DATA_AI_FD_SETUP,
-    DATA_AI_INTRUSION_SETUP,
-    DATA_AI_LCD_SETUP,
-    DATA_AI_LPD_SETUP,
-    DATA_AI_PVD_SETUP,
     DATA_CHANNEL_INFO,
     DATA_DEVICE_INFO,
     DATA_DISARMING,
@@ -48,7 +43,7 @@ from .const import (
     EVENT_ALARM,
 )
 from .coordinator import RaySharpNVRCoordinator
-from .entity import RaySharpChannelEntity, RaySharpEntity, channel_num_from_str
+from .entity import RaySharpChannelEntity, RaySharpEntity, _get_detection_enabled, channel_num_from_str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -95,55 +90,6 @@ def _get_channel_list(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(channels, list):
         channels = [channels]
     return channels
-
-
-def _get_detection_enabled(
-    data: dict[str, Any], channel_num: int, alarm_type: str
-) -> bool | None:
-    """Check if an alarm/detection type is enabled on the NVR for a channel.
-
-    Returns:
-        True  – explicitly enabled in NVR config
-        False – explicitly disabled (entity will start as disabled in HA)
-        None  – config not available, default to enabled
-
-    NVR setup data structure (FD/PVD/LCD/Intrusion):
-        {"channel_info": {"CH17": {"switch": true/false, ...}}}
-    """
-    ch_key = f"CH{channel_num}"
-
-    def _ch_switch(data_key: str) -> bool | None:
-        setup = data.get(data_key)
-        if not isinstance(setup, dict):
-            return None
-        ch_info = setup.get("channel_info", {})
-        if not isinstance(ch_info, dict):
-            return None
-        ch = ch_info.get(ch_key, {})
-        if not isinstance(ch, dict):
-            return None
-        switch = ch.get("switch")
-        return bool(switch) if switch is not None else None
-
-    if alarm_type in (ALARM_TYPE_PERSON, ALARM_TYPE_VEHICLE):
-        # Person and Vehicle detection require AI PVD (Human & Vehicle Detection)
-        return _ch_switch(DATA_AI_PVD_SETUP)
-    if alarm_type == ALARM_TYPE_MOTION:
-        # Basic motion detection works independently of AI PVD — always enabled
-        return None
-    if alarm_type == ALARM_TYPE_FACE:
-        return _ch_switch(DATA_AI_FD_SETUP)
-    if alarm_type == ALARM_TYPE_PLATE:
-        # Try dedicated LPD setup first; fall back to FD setup if LPD returns 404
-        lpd = _ch_switch(DATA_AI_LPD_SETUP)
-        return lpd if lpd is not None else _ch_switch(DATA_AI_FD_SETUP)
-    if alarm_type == ALARM_TYPE_LINE_CROSSING:
-        return _ch_switch(DATA_AI_LCD_SETUP)
-    if alarm_type == ALARM_TYPE_INTRUSION:
-        return _ch_switch(DATA_AI_INTRUSION_SETUP)
-    # SOD, sound, PIR, wander, region, occlusion, crowd, IO —
-    # no per-channel config currently fetched → default to enabled
-    return None
 
 
 # (alarm_type, key_suffix, translation_key, device_class)

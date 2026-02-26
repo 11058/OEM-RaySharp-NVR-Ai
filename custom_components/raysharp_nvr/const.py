@@ -285,5 +285,11 @@ STORAGE_KEEP_DAYS = 30   # keep entries for 30 days
 STORAGE_SAVE_DELAY = 60  # debounce: save at most every 60 s
 DOMAIN_TRACKERS = "raysharp_nvr_trackers"  # hass.data key for tracker refs
 
+# ─── Snapshot History ──────────────────────────────────────────────────────────
+API_AI_VHD_GET = "/API/AI/VhdLog/GetByIndex"  # person/vehicle image search
+STORAGE_KEY_SNAPSHOTS_PREFIX = "raysharp_nvr_snap"  # suffix: _{channel}_{type}
+CONF_SNAPSHOT_HISTORY_COUNT = "snapshot_history_count"
+DEFAULT_SNAPSHOT_HISTORY_COUNT = 5
+
 # ─── Platforms ────────────────────────────────────────────────────────────────
 PLATFORMS = ["sensor", "binary_sensor", "camera", "event", "image", "switch", "button"]

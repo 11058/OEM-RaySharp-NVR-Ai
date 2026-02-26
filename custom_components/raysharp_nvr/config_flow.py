@@ -22,11 +22,13 @@ from .const import (
     CONF_HOST,
     CONF_PASSWORD,
     CONF_PORT,
+    CONF_SNAPSHOT_HISTORY_COUNT,
     CONF_USERNAME,
     DEFAULT_EVENT_PUSH_AUTO_CONFIGURE,
     DEFAULT_EVENT_TIMEOUT,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SNAPSHOT_HISTORY_COUNT,
     DEFAULT_USERNAME,
     DOMAIN,
 )
@@ -171,6 +173,9 @@ class RaySharpNVROptionsFlow(OptionsFlow):
         current_event_timeout = self._config_entry.options.get(
             CONF_EVENT_TIMEOUT, DEFAULT_EVENT_TIMEOUT
         )
+        current_history_count = self._config_entry.options.get(
+            CONF_SNAPSHOT_HISTORY_COUNT, DEFAULT_SNAPSHOT_HISTORY_COUNT
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -187,6 +192,10 @@ class RaySharpNVROptionsFlow(OptionsFlow):
                         CONF_EVENT_TIMEOUT,
                         default=current_event_timeout,
                     ): vol.All(int, vol.Range(min=5, max=300)),
+                    vol.Required(
+                        CONF_SNAPSHOT_HISTORY_COUNT,
+                        default=current_history_count,
+                    ): vol.All(int, vol.Range(min=1, max=10)),
                 }
             ),
         )
