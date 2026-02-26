@@ -332,28 +332,29 @@ class RaySharpNVRClient:
         sequence: int | None = None,
         lap_number: int | None = None,
     ) -> dict[str, Any]:
-        """Long-polling Event Check for real-time NVR events.
+        """Short-poll NVR /API/Event/Check for real-time alarm events.
 
-        First call (reader_id=None): NVR creates a subscription, returns reader_id
-        and current sequence.  Subsequent calls: pass reader_id + sequence to get
-        only events newer than that sequence.  If no new events arrive within the
-        server-side timeout, the NVR responds with {"heat_alarm": "HeatAlarm"}.
+        The NVR uses a reader_id subscription model:
+        • First call  (reader_id=None): send empty body {} → NVR returns
+          reader_id, sequence, lap_number and the current alarm state.
+        • Subsequent  (reader_id set): send {reader_id, sequence, lap_number}
+          → NVR returns new alarm events since last sequence, or
+          {"heat_alarm": "HeatAlarm"} if nothing changed.
 
-        Uses a 35-second HTTP timeout to cover the NVR's own long-poll window.
-        asyncio.TimeoutError means the OS-level socket timed out (normal on slow
-        links); in that case we return an empty dict so the caller can retry.
+        IMPORTANT: The NVR rejects null-valued fields with HTTP 400.  So we
+        omit reader_id/sequence/lap_number entirely on the first call (empty
+        body) and only include them when they have real values.
         """
-        payload_data: dict[str, Any] = {
-            "plus_eventchk": "eventAiPushPic",
-            "ext_data": {
-                "subscribe_type": [
-                    {"event": ["all"], "aipushpic": ["all"]}
-                ]
-            },
-            "reader_id": reader_id,
-            "sequence": sequence,
-            "lap_number": lap_number,
-        }
+        if reader_id is None:
+            # First call: subscribe / get initial state — empty body required.
+            payload_data: dict[str, Any] = {}
+        else:
+            payload_data = {
+                "reader_id": reader_id,
+                "sequence": sequence,
+                "lap_number": lap_number,
+            }
+
         session = self._get_session()
         url = f"{self._base_url}{API_EVENT_CHECK}"
         payload = {"version": "1.0", "data": payload_data}
@@ -364,13 +365,13 @@ class RaySharpNVRClient:
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=35),
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 401:
                     _LOGGER.debug("Event check got 401, re-logging in")
                     async with self._lock:
                         await self.async_login()
-                    # Retry once after re-login (without reader_id — re-subscribe)
+                    # Re-subscribe after re-login
                     return await self.async_event_check(None, None, None)
 
                 if resp.status != 200:
@@ -388,8 +389,7 @@ class RaySharpNVRClient:
                 return await resp.json(content_type=None)
 
         except asyncio.TimeoutError:
-            # Network-level timeout — not a NVR heartbeat, just a stale socket.
-            # Return empty so the caller retries with existing reader_id.
+            # Socket-level timeout — return empty so the caller retries.
             return {}
         except aiohttp.ClientError as err:
             raise RaySharpNVRConnectionError(

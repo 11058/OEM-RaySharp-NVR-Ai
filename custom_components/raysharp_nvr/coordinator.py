@@ -347,8 +347,10 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 consecutive_errors = 0
                 retry_delay = 5.0
-                # Small yield to prevent tight CPU loops on instant NVR replies
-                await asyncio.sleep(0.2)
+                # Short-polling: NVR responds immediately.  Throttle to avoid
+                # hammering the device — 2 s between requests is enough for
+                # real-time event detection without overloading the NVR.
+                await asyncio.sleep(2)
 
             except asyncio.CancelledError:
                 _LOGGER.debug("Event Check loop cancelled")
