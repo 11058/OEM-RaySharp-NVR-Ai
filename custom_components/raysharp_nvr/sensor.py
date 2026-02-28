@@ -640,6 +640,49 @@ async def async_setup_entry(
 
 # ─── EventPush accumulator sensors (persistent storage) ───────────────────────
 
+# Cyrillic plate letters that are visually identical to Latin letters.
+# Russian plates officially use only these 12 Cyrillic characters.
+# Some NVR firmware or OCR engines return them in Latin; normalise to Latin
+# so plate comparison is consistent regardless of the source encoding.
+_PLATE_CYR_TO_LAT = str.maketrans(
+    "АВЕКМНОРСТУХавекмнорстух",
+    "ABEKMHOPCTYXabekmhopctyx",
+)
+
+# Maximum gap (seconds) between two events of the *same* plate that are
+# treated as a single detection (deduplication window).
+_PLATE_DEDUP_SECS = 60
+
+
+def _normalize_plate(text: str) -> str:
+    """Normalise plate text: translate Cyrillic look-alikes → Latin, uppercase."""
+    if not text:
+        return ""
+    return text.translate(_PLATE_CYR_TO_LAT).upper()
+
+
+def _plates_are_same(p1: str, p2: str, min_common: int = 3) -> bool:
+    """Return True if two normalised plate strings look like the same vehicle.
+
+    Uses position-wise character matching: if at least *min_common* characters
+    are identical at the same index, the plates are treated as duplicates.
+    This tolerates single-character OCR mistakes (e.g. 'X' read as 'K') and
+    partial reads (fewer characters), while still rejecting genuinely different
+    plates that happen to share a few digits.
+    """
+    if p1 == p2:
+        return True
+    # Quick rejection: if length difference is too large, skip position check
+    # but still allow substring match for partial reads.
+    short, long_ = (p1, p2) if len(p1) <= len(p2) else (p2, p1)
+    if len(short) < min_common:
+        return False
+    if short in long_:
+        return True
+    matches = sum(c1 == c2 for c1, c2 in zip(p1, p2))
+    return matches >= min_common
+
+
 def _grp_id_to_list_type(grp_id: Any) -> str:
     """Convert NVR face-group policy code to a list-type key.
 
@@ -827,6 +870,15 @@ class RaySharpPlatesTrackerSensor(_BaseTrackerSensor):
         if not plate:
             return
         now = datetime.now()
+        # ── Deduplication: skip if same plate seen within the last window ──────
+        plate_norm = _normalize_plate(plate)
+        dedup_cutoff = (now - timedelta(seconds=_PLATE_DEDUP_SECS)).isoformat()
+        for e in reversed(self._entries):
+            if e.get("timestamp", "") < dedup_cutoff:
+                break
+            if _plates_are_same(plate_norm, _normalize_plate(e.get("plate_number", ""))):
+                return  # Duplicate within dedup window, discard
+        # ─────────────────────────────────────────────────────────────────────
         entry: dict[str, Any] = {
             "plate_number": plate,
             "channel": data.get("channel", 0),

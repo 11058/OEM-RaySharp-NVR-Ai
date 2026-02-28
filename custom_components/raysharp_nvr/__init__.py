@@ -249,7 +249,7 @@ def _webhook_log_interesting(payload: Any) -> None:
         _LOGGER.info(
             "NVR EventPush: %d plate(s) in ai_snap_picture.PlateInfo — %s",
             len(plates),
-            [{"ch": p.get("StrChn"), "plate": p.get("Id"), "grp": p.get("GrpId")} for p in plates if isinstance(p, dict)],
+            [{"ch": p.get("StrChn"), "plate": p.get("Id") or p.get("SnapId"), "grp": p.get("GrpId")} for p in plates if isinstance(p, dict)],
         )
     if faces:
         _LOGGER.info(
@@ -388,9 +388,12 @@ def _parse_snapshot_payload(payload: Any) -> list[dict[str, Any]]:
         snapshots.append(snap)
 
     # ── PlateInfo: License Plate Detection (LPD) ─────────────────────────────
-    # Fields: Id (plate text), GrpId (1=allow/2=block/3=stranger), Chn (0-based
-    # index), StrChn (e.g. "CH16"), PlateImg (plate crop), BgImg (background),
-    # CarBrand, CarType, CarColor, StartTime, EndTime, SnapId.
+    # Fields: Id (plate text for DB-registered plates, empty for strangers),
+    # SnapId (OCR-read plate text used as snapshot ID — the only text field
+    # populated for GrpId=3 stranger plates),
+    # GrpId (1=allow/2=block/3=stranger), Chn (0-based index),
+    # StrChn (e.g. "CH16"), PlateImg (plate crop), BgImg (background),
+    # CarBrand, CarType, CarColor, StartTime, EndTime.
     for item in ai_snap.get("PlateInfo", []):
         if not isinstance(item, dict):
             continue
@@ -403,7 +406,9 @@ def _parse_snapshot_payload(payload: Any) -> list[dict[str, Any]]:
             "snap_id": item.get("SnapId"),
             "start_time": item.get("StartTime"),
             "end_time": item.get("EndTime"),
-            "plate_number": item.get("Id", ""),
+            # For registered plates (GrpId 1/2) Id = DB plate text.
+            # For stranger plates (GrpId 3) Id is empty; SnapId carries the OCR text.
+            "plate_number": item.get("Id") or item.get("SnapId", ""),
             "grp_id": item.get("GrpId"),
             "car_brand": item.get("CarBrand", ""),
             "car_type": item.get("CarType", ""),
