@@ -347,6 +347,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Dispatch events to HA bus when payload contains real events
                 has_alarm = "alarm_list" in data and data["alarm_list"]
                 has_snap = "ai_snap_picture" in data and data["ai_snap_picture"]
+                # talkback_alarm lives inside alarm_list entries — already covered by has_alarm
                 if has_alarm or has_snap:
                     self._dispatch_event_check_data(response)
 
@@ -390,8 +391,12 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         at module load time.
         """
         try:
-            from . import _parse_alarm_payload, _parse_snapshot_payload  # noqa: PLC0415
-            from .const import EVENT_ALARM, EVENT_SNAPSHOT  # noqa: PLC0415
+            from . import (  # noqa: PLC0415
+                _parse_alarm_payload,
+                _parse_doorbell_payload,
+                _parse_snapshot_payload,
+            )
+            from .const import EVENT_ALARM, EVENT_DOORBELL, EVENT_SNAPSHOT  # noqa: PLC0415
         except ImportError:
             _LOGGER.debug("Could not import event parsers — skipping dispatch")
             return
@@ -410,4 +415,12 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Event Check: fired %s snapshot for channel %s",
                 snap.get("alarm_type"),
                 snap.get("channel"),
+            )
+
+        for doorbell_data in _parse_doorbell_payload(response):
+            self.hass.bus.async_fire(EVENT_DOORBELL, doorbell_data)
+            _LOGGER.debug(
+                "Event Check: doorbell event channel=%s ringing=%s",
+                doorbell_data.get("channel"),
+                doorbell_data.get("ringing"),
             )

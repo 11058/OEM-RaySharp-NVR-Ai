@@ -185,6 +185,99 @@ data:
 
 ---
 
+## Вызывная панель (домофон)
+
+### Обнаружение звонка
+
+Когда посетитель нажимает кнопку вызывной панели, NVR генерирует `talkback_alarm` — интеграция перехватывает его через `Event/Check` (или EventPush webhook) и:
+
+- Переводит бинарный сенсор `binary_sensor.<ch>_doorbell` в **ON**
+- Генерирует событие `raysharp_nvr_doorbell` на шине HA
+
+> Сенсор **Doorbell** создаётся для каждого канала, но по умолчанию отключён. Включите его вручную в **Settings → Entities** для канала, к которому подключена вызывная панель.
+
+### Структура события `raysharp_nvr_doorbell`
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `channel` | int | Номер канала NVR |
+| `channel_str` | str | Строковое имя канала ("CH1") |
+| `ringing` | bool | `true` — звонок начался, `false` — завершён |
+| `intercom_channel` | int | Внутренний номер домофонного канала (1–127) |
+| `error_code` | str | Причина завершения (`localuser_close_talkback` и др.) |
+| `timestamp` | str | Временная метка NVR |
+
+### Ответ на звонок / двустороннее аудио
+
+| Сервис | Описание |
+|---|---|
+| `raysharp_nvr.doorbell_answer` | Открывает аудиосессию DualTalk на канале NVR (action=1) |
+| `raysharp_nvr.doorbell_hang_up` | Закрывает аудиосессию (action=0) |
+
+После вызова `doorbell_answer` аудио с микрофона вызывной панели доступно в RTSP-потоке канала. Звук со стороны HA на панель передаётся через встроенный микрофон/динамик NVR.
+
+> **Полноценное двустороннее аудио из HA** требует SIP-интеграции (напр., Asterisk add-on). Включите SIP в настройках NVR (`/API/AccessSystem/Intercom/CallSetup/Set`, параметр `enable_sip: true`), затем настройте HA VoIP.
+
+### Карточка вызывной панели
+
+```yaml
+type: vertical-stack
+cards:
+  - type: picture-entity
+    entity: camera.ch1_doorbell
+    show_state: false
+    show_name: false
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Ответить
+        icon: mdi:phone
+        tap_action:
+          action: call-service
+          service: raysharp_nvr.doorbell_answer
+          service_data:
+            config_entry_id: YOUR_ENTRY_ID
+            channel: 1
+
+      - type: button
+        name: Завершить
+        icon: mdi:phone-hangup
+        tap_action:
+          action: call-service
+          service: raysharp_nvr.doorbell_hang_up
+          service_data:
+            config_entry_id: YOUR_ENTRY_ID
+            channel: 1
+
+  - type: entity
+    entity: binary_sensor.ch1_doorbell
+    name: Состояние звонка
+```
+
+### Автоматизация — уведомление при звонке
+
+```yaml
+automation:
+  trigger:
+    platform: state
+    entity_id: binary_sensor.ch1_doorbell
+    to: "on"
+  action:
+    - service: notify.mobile_app
+      data:
+        title: "Вызывная панель"
+        message: "Посетитель у двери!"
+        data:
+          actions:
+            - action: DOORBELL_ANSWER
+              title: "Ответить"
+            - action: DOORBELL_HANGUP
+              title: "Отклонить"
+```
+
+---
+
 ## Карточки для Dashboard
 
 ### Карточка: Номерные знаки (последние 24 часа)

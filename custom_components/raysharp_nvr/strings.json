@@ -95,7 +95,8 @@
       "region_exiting": { "name": "Region Exiting" },
       "occlusion_detected": { "name": "Occlusion Detected" },
       "pir_detected": { "name": "PIR Motion" },
-      "crowd_detected": { "name": "Crowd Detected" }
+      "crowd_detected": { "name": "Crowd Detected" },
+      "doorbell": { "name": "Doorbell" }
     },
     "switch": {
       "alarm_disarming": { "name": "Alarm Disarming" },
@@ -131,6 +132,14 @@
     "search_records": {
       "name": "Search Records",
       "description": "Search for recorded video files on the NVR."
+    },
+    "doorbell_answer": {
+      "name": "Answer Doorbell",
+      "description": "Open two-way audio on the door panel channel."
+    },
+    "doorbell_hang_up": {
+      "name": "Hang Up Doorbell",
+      "description": "Close the active two-way audio session."
     }
   }
 }

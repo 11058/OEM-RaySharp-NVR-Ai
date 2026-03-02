@@ -95,7 +95,8 @@
       "region_exiting": { "name": "Выход из зоны" },
       "occlusion_detected": { "name": "Перекрытие камеры" },
       "pir_detected": { "name": "PIR датчик" },
-      "crowd_detected": { "name": "Скопление людей" }
+      "crowd_detected": { "name": "Скопление людей" },
+      "doorbell": { "name": "Вызывная панель" }
     },
     "switch": {
       "alarm_disarming": { "name": "Снятие с охраны" },
@@ -131,6 +132,14 @@
     "search_records": {
       "name": "Поиск записей",
       "description": "Найти видеозаписи на NVR за указанный период."
+    },
+    "doorbell_answer": {
+      "name": "Ответить на звонок",
+      "description": "Открыть двустороннее аудио на канале вызывной панели."
+    },
+    "doorbell_hang_up": {
+      "name": "Завершить звонок",
+      "description": "Закрыть активную сессию двустороннего аудио."
     }
   }
 }

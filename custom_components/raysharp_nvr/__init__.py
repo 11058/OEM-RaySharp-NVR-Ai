@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +43,7 @@ from .const import (
     API_AI_FD_GROUPS,
     API_AI_OBJECTS_GET_BY_INDEX,
     API_AI_PLATES,
+    API_DUALTALK_SET,
     API_EVENT_PUSH_SET,
     API_MANUAL_ALARM_SET,
     API_PTZ_CONTROL,
@@ -58,11 +60,14 @@ from .const import (
     DOMAIN,
     DOMAIN_TRACKERS,
     EVENT_ALARM,
+    EVENT_DOORBELL,
     EVENT_SNAPSHOT,
     PLATFORMS,
     PTZ_STATE_START,
     SERVICE_CLEAR_DETECTIONS,
     SERVICE_CONFIGURE_EVENT_PUSH,
+    SERVICE_DOORBELL_ANSWER,
+    SERVICE_DOORBELL_HANG_UP,
     SERVICE_GET_PLATE_DATABASE_INFO,
     SERVICE_GET_SNAPSHOT,
     SERVICE_PTZ_CONTROL,
@@ -73,6 +78,7 @@ from .const import (
     WEBHOOK_ID_PREFIX,
 )
 from .coordinator import RaySharpNVRCoordinator
+from .talk_ws import async_register_talk_view
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -222,6 +228,15 @@ async def _handle_webhook(
     events = _parse_alarm_payload(payload)
     for event_data in events:
         hass.bus.async_fire(EVENT_ALARM, event_data)
+
+    # Handle doorbell / talkback events
+    for doorbell_data in _parse_doorbell_payload(payload):
+        hass.bus.async_fire(EVENT_DOORBELL, doorbell_data)
+        _LOGGER.debug(
+            "Fired doorbell event for channel %s ringing=%s",
+            doorbell_data.get("channel"),
+            doorbell_data.get("ringing"),
+        )
 
     return web.Response(text="OK", status=200)
 
@@ -552,6 +567,55 @@ def _parse_single_event(data: dict[str, Any]) -> dict[str, Any]:
             event[key] = data[key]
 
     return event
+
+
+def _parse_doorbell_payload(payload: Any) -> list[dict[str, Any]]:
+    """Parse talkback/doorbell events from Event/Check or EventPush webhook.
+
+    The NVR reports doorbell rings inside channel_alarm[].talkback_alarm[].
+    Returns a list of event dicts with fields:
+      channel      – NVR channel number (int, CH-string converted)
+      channel_str  – original channel string e.g. "CH1"
+      ringing      – True when a call starts, False when it ends
+      intercom_channel – intercom sub-channel (1-127, device-internal)
+      error_code   – reason for close (if any)
+      timestamp    – ISO timestamp string from alarm_list.time
+    """
+    results: list[dict[str, Any]] = []
+    if not isinstance(payload, dict):
+        return results
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return results
+    alarm_list = data.get("alarm_list", [])
+    if not isinstance(alarm_list, list):
+        return results
+
+    for alarm_entry in alarm_list:
+        if not isinstance(alarm_entry, dict):
+            continue
+        timestamp = alarm_entry.get("time", "")
+        for ch_alarm in alarm_entry.get("channel_alarm", []):
+            if not isinstance(ch_alarm, dict):
+                continue
+            channel_str = str(ch_alarm.get("channel", ""))
+            channel_num = _channel_str_to_int(channel_str)
+            talkback_list = ch_alarm.get("talkback_alarm", [])
+            if not isinstance(talkback_list, list) or not talkback_list:
+                continue
+            for tb in talkback_list:
+                if not isinstance(tb, dict):
+                    continue
+                talkback_close = bool(tb.get("talkback_close", False))
+                results.append({
+                    "channel": channel_num,
+                    "channel_str": channel_str,
+                    "ringing": not talkback_close,
+                    "intercom_channel": tb.get("channel"),
+                    "error_code": tb.get("error_code", ""),
+                    "timestamp": timestamp,
+                })
+    return results
 
 
 # ─── Auto-configure EventPush ─────────────────────────────────────────────────
@@ -1009,6 +1073,54 @@ async def _async_handle_clear_detections(
             _LOGGER.info("Cleared faces detection history for entry %s", entry_id)
 
 
+async def _async_handle_doorbell_answer(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Handle the doorbell_answer service call.
+
+    Opens the two-way audio session on the NVR channel via DualTalk API.
+    After answering, audio from the door panel is routed through the NVR
+    (audible on the NVR speaker and in the RTSP audio stream).
+    """
+    entry_id = call.data["config_entry_id"]
+    coordinator = _get_coordinator_for_entry(hass, entry_id)
+    if coordinator is None:
+        _LOGGER.error("No coordinator found for config entry %s", entry_id)
+        return
+
+    channel_num = call.data["channel"]
+    payload = {"channel": f"CH{channel_num}", "action": 1}
+
+    try:
+        await coordinator.client.async_api_call(API_DUALTALK_SET, payload)
+        _LOGGER.info("Doorbell answered: DualTalk opened on CH%s", channel_num)
+    except RaySharpNVRConnectionError as err:
+        _LOGGER.error("Failed to answer doorbell on CH%s: %s", channel_num, err)
+
+
+async def _async_handle_doorbell_hang_up(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Handle the doorbell_hang_up service call.
+
+    Closes the two-way audio session on the NVR channel via DualTalk API.
+    """
+    entry_id = call.data["config_entry_id"]
+    coordinator = _get_coordinator_for_entry(hass, entry_id)
+    if coordinator is None:
+        _LOGGER.error("No coordinator found for config entry %s", entry_id)
+        return
+
+    channel_num = call.data["channel"]
+    payload = {"channel": f"CH{channel_num}", "action": 0}
+
+    try:
+        await coordinator.client.async_api_call(API_DUALTALK_SET, payload)
+        _LOGGER.info("Doorbell hung up: DualTalk closed on CH%s", channel_num)
+    except RaySharpNVRConnectionError as err:
+        _LOGGER.error("Failed to hang up doorbell on CH%s: %s", channel_num, err)
+
+
 async def _async_handle_configure_event_push(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
@@ -1104,6 +1216,13 @@ CLEAR_DETECTIONS_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required("config_entry_id"): cv.string,
         vol.Optional("detection_type", default="all"): vol.In(["plates", "faces", "all"]),
+    }
+)
+
+DOORBELL_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("config_entry_id"): cv.string,
+        vol.Required("channel"): vol.All(int, vol.Range(min=1, max=64)),
     }
 )
 
@@ -1288,6 +1407,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
             schema=CLEAR_DETECTIONS_SERVICE_SCHEMA,
         )
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_DOORBELL_ANSWER,
+            lambda call: hass.async_create_task(
+                _async_handle_doorbell_answer(hass, call)
+            ),
+            schema=DOORBELL_SERVICE_SCHEMA,
+        )
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_DOORBELL_HANG_UP,
+            lambda call: hass.async_create_task(
+                _async_handle_doorbell_hang_up(hass, call)
+            ),
+            schema=DOORBELL_SERVICE_SCHEMA,
+        )
+
+    # Register WebSocket view + Lovelace card static files (once per process)
+    _talk_flag = f"{DOMAIN}_talk_registered"
+    if not hass.data.get(_talk_flag):
+        async_register_talk_view(hass)
+        www_path = Path(__file__).parent / "www"
+        if www_path.is_dir():
+            hass.http.register_static_path(
+                f"/{DOMAIN}",
+                str(www_path),
+                cache_headers=True,
+            )
+        hass.data[_talk_flag] = True
 
     return True
 

@@ -152,6 +152,55 @@ trigger_alarm_output:
       selector:
         boolean:
 
+doorbell_answer:
+  name: Answer Doorbell
+  description: >
+    Answer an incoming doorbell call by opening the two-way audio (DualTalk)
+    session on the specified NVR channel. After answering, audio from the door
+    panel is available in the RTSP stream of that channel.
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: The config entry ID of the RaySharp NVR integration instance.
+      required: true
+      selector:
+        config_entry:
+          integration: raysharp_nvr
+    channel:
+      name: Channel Number
+      description: NVR channel number of the door panel camera (1-based).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 64
+          mode: box
+
+doorbell_hang_up:
+  name: Hang Up Doorbell
+  description: >
+    End the active doorbell call by closing the two-way audio (DualTalk)
+    session on the specified NVR channel.
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: The config entry ID of the RaySharp NVR integration instance.
+      required: true
+      selector:
+        config_entry:
+          integration: raysharp_nvr
+    channel:
+      name: Channel Number
+      description: NVR channel number of the door panel camera (1-based).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 64
+          mode: box
+
 search_records:
   name: Search Records
   description: >

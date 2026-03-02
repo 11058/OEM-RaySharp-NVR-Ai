@@ -105,6 +105,8 @@ API_MANUAL_ALARM_GET = "/API/PreviewChannel/ManualAlarm/Get"
 API_MANUAL_ALARM_SET = "/API/PreviewChannel/ManualAlarm/Set"
 API_FLOODLIGHT = "/API/PreviewChannel/Floodlight2AudioAlarm/Get"
 API_FLOODLIGHT_SET = "/API/PreviewChannel/Floodlight2AudioAlarm/Set"
+API_DUALTALK_GET = "/API/PreviewChannel/DualTalk/Get"
+API_DUALTALK_SET = "/API/PreviewChannel/DualTalk/Set"
 
 # ─── Channel Configuration ────────────────────────────────────────────────────
 API_CHANNEL_CONFIG = "/API/ChannelConfig/ChannelConfig/Get"
@@ -247,8 +249,10 @@ WEBHOOK_ID_PREFIX = "raysharp_nvr_"
 # ─── HA Events ────────────────────────────────────────────────────────────────
 EVENT_ALARM = "raysharp_nvr_alarm"
 EVENT_SNAPSHOT = "raysharp_nvr_snapshot"
+EVENT_DOORBELL = "raysharp_nvr_doorbell"
 
 # ─── Alarm Types ─────────────────────────────────────────────────────────────
+ALARM_TYPE_DOORBELL = "doorbell"
 ALARM_TYPE_MOTION = "motion"
 ALARM_TYPE_PERSON = "person"
 ALARM_TYPE_VEHICLE = "vehicle"
@@ -276,6 +280,8 @@ SERVICE_SEARCH_FACES = "search_faces"
 SERVICE_GET_PLATE_DATABASE_INFO = "get_plate_database_info"
 SERVICE_CONFIGURE_EVENT_PUSH = "configure_event_push"
 SERVICE_CLEAR_DETECTIONS = "clear_detections_history"
+SERVICE_DOORBELL_ANSWER = "doorbell_answer"
+SERVICE_DOORBELL_HANG_UP = "doorbell_hang_up"
 
 # ─── Storage ───────────────────────────────────────────────────────────────────
 STORAGE_KEY_PLATES = "raysharp_nvr_plates"

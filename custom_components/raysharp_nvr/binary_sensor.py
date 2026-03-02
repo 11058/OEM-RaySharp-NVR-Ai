@@ -41,6 +41,7 @@ from .const import (
     DEFAULT_EVENT_TIMEOUT,
     DOMAIN,
     EVENT_ALARM,
+    EVENT_DOORBELL,
 )
 from .coordinator import RaySharpNVRCoordinator
 from .entity import RaySharpChannelEntity, RaySharpEntity, _get_detection_enabled, channel_num_from_str
@@ -175,6 +176,16 @@ async def async_setup_entry(
                     event_timeout=event_timeout,
                 )
             )
+
+        # Doorbell / talkback sensor (one per channel)
+        entities.append(
+            RaySharpDoorbellBinarySensor(
+                coordinator,
+                channel_num=channel_num,
+                channel_name=channel_name,
+                event_timeout=event_timeout,
+            )
+        )
 
     async_add_entities(entities)
 
@@ -330,6 +341,84 @@ class RaySharpEventBinarySensor(RaySharpChannelEntity, BinarySensorEntity):
     @callback
     def _async_reset(self, _now: Any) -> None:
         """Reset the sensor to off after timeout."""
+        self._is_on = False
+        self._reset_unsub = None
+        self.async_write_ha_state()
+
+
+class RaySharpDoorbellBinarySensor(RaySharpChannelEntity, BinarySensorEntity):
+    """Binary sensor that turns on when someone rings the door panel on this channel.
+
+    Listens to EVENT_DOORBELL events fired by the coordinator (Event/Check
+    talkback_alarm) or the webhook handler.  Turns ON when ringing=True,
+    turns OFF when ringing=False or after the event timeout.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+    _attr_icon = "mdi:doorbell"
+
+    def __init__(
+        self,
+        coordinator: RaySharpNVRCoordinator,
+        channel_num: int,
+        channel_name: str,
+        event_timeout: int,
+    ) -> None:
+        """Initialize the doorbell binary sensor."""
+        super().__init__(coordinator, channel_num, channel_name)
+        self._event_timeout = event_timeout
+        self._is_on = False
+        self._reset_unsub: Callable[[], None] | None = None
+
+        device_data = coordinator.data.get(DATA_DEVICE_INFO, {}) or {}
+        mac = device_data.get("mac_addr", "unknown")
+        self._attr_unique_id = f"{mac}_ch{channel_num}_doorbell"
+        self._attr_name = "Doorbell"
+        self._attr_translation_key = "doorbell"
+        # Disabled by default — only enabled when user has a door panel camera
+        self._attr_entity_registry_enabled_default = False
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while the doorbell is ringing."""
+        return self._is_on
+
+    async def async_added_to_hass(self) -> None:
+        """Register event listener when entity is added."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_DOORBELL, self._handle_doorbell_event)
+        )
+
+    @callback
+    def _handle_doorbell_event(self, event: Any) -> None:
+        """Handle a doorbell event from the NVR."""
+        data = event.data
+        if data.get("channel", 0) != self._channel_num:
+            return
+
+        ringing = bool(data.get("ringing", True))
+
+        if ringing:
+            self._is_on = True
+            self.async_write_ha_state()
+            # Schedule auto-reset in case the "call ended" event never arrives
+            if self._reset_unsub is not None:
+                self._reset_unsub()
+            self._reset_unsub = async_call_later(
+                self.hass, self._event_timeout, self._async_reset
+            )
+        else:
+            # Explicit "call ended" — cancel timer and turn off immediately
+            if self._reset_unsub is not None:
+                self._reset_unsub()
+                self._reset_unsub = None
+            self._is_on = False
+            self.async_write_ha_state()
+
+    @callback
+    def _async_reset(self, _now: Any) -> None:
+        """Auto-reset the sensor after timeout."""
         self._is_on = False
         self._reset_unsub = None
         self.async_write_ha_state()
