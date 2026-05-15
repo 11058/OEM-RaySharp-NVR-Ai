@@ -159,9 +159,11 @@ NVR_ALARM_TYPE_MAP: dict[str, str] = {
     "RegionEntrance": ALARM_TYPE_REGION_ENTRANCE,
     "region_exiting": ALARM_TYPE_REGION_EXITING,
     "RegionExiting": ALARM_TYPE_REGION_EXITING,
-    # Occlusion
+    # Occlusion / Video Tampering (Table 10: int_subtype "video_tamper")
     "occlusion": ALARM_TYPE_OCCLUSION,
     "OcclusionDetection": ALARM_TYPE_OCCLUSION,
+    "video_tamper": ALARM_TYPE_OCCLUSION,
+    "VideoTampering": ALARM_TYPE_OCCLUSION,
     # PIR
     "pir": ALARM_TYPE_PIR,
     "PIR": ALARM_TYPE_PIR,
@@ -483,8 +485,28 @@ def _parse_alarm_payload(payload: Any) -> list[dict[str, Any]]:
         data = payload
 
     # ── Format 1: RaySharp native EventPush alarm_list ─────────────────────
-    # {"data": {"alarm_list": [{"time": "...", "channel_alarm": [
-    #   {"channel": "CH17", "int_alarm": {"int_subtype": "pd_vd"}}]}]}}
+    # Event/Check returns a per-poll snapshot covering every channel. Per the
+    # API spec (Get&Push, Table 5) the channel_alarm[] entries are mostly status
+    # updates (record_flag / camera_connect_status / channel_name / Floodlight…)
+    # — they MUST NOT be converted into alarms. A real alarm is signalled by
+    # one of these flags:
+    #   - int_alarm.alarm_val == True           → AI alarm trigger
+    #                                             (subtype from Table 10
+    #                                              int_subtype: pd / fd / pd_vd /
+    #                                              lcd / pid / sod / lpd / rsd /
+    #                                              intrusion / region_entrance /
+    #                                              region_exiting / sound / …)
+    #   - motion_alarm == True                  → classic motion alarm
+    #   - pir_alarm == True                     → PIR alarm
+    #   - io_alarm == True                      → IO input alarm
+    #
+    # Intentionally ignored:
+    #   - alarm_state[]  → "currently active alarms" snapshot that re-appears
+    #                      every poll while the AI alarm is still active;
+    #                      firing on it would produce one event per poll.
+    #                      int_alarm is the single rising-edge trigger.
+    #   - videoloss      → has its own coordinator-polled binary_sensor.
+    #   - talkback_alarm → handled by _parse_doorbell_payload.
     alarm_list = data.get("alarm_list")
     if isinstance(alarm_list, list):
         for alarm_entry in alarm_list:
@@ -492,15 +514,36 @@ def _parse_alarm_payload(payload: Any) -> list[dict[str, Any]]:
             for ch_alarm in alarm_entry.get("channel_alarm", []):
                 ch_str = str(ch_alarm.get("channel", ""))
                 channel = _channel_str_to_int(ch_str)
-                int_alarm = ch_alarm.get("int_alarm", {})
-                raw_type = str(int_alarm.get("int_subtype", "motion"))
-                alarm_type = _normalize_alarm_type(raw_type)
-                event: dict[str, Any] = {"alarm_type": alarm_type, "channel": channel}
-                if timestamp:
-                    event["timestamp"] = timestamp
-                events.append(event)
-        if events:
-            return events
+
+                triggered: list[str] = []
+
+                int_alarm = ch_alarm.get("int_alarm")
+                if isinstance(int_alarm, dict) and int_alarm.get("alarm_val") is True:
+                    subtype = str(int_alarm.get("int_subtype", "")).strip()
+                    if subtype:
+                        triggered.append(subtype)
+
+                if ch_alarm.get("motion_alarm") is True:
+                    triggered.append("motion")
+                if ch_alarm.get("pir_alarm") is True:
+                    triggered.append("pir")
+                if ch_alarm.get("io_alarm") is True:
+                    triggered.append("io")
+
+                for raw_type in triggered:
+                    alarm_type = _normalize_alarm_type(raw_type)
+                    event: dict[str, Any] = {
+                        "alarm_type": alarm_type,
+                        "channel": channel,
+                    }
+                    if timestamp:
+                        event["timestamp"] = timestamp
+                    events.append(event)
+        # alarm_list IS the Format-1 signal even when no triggers were found
+        # (the NVR sends per-poll status snapshots with no real alarms).
+        # Do not fall through to Formats 2/3 or the default-motion fallback —
+        # that produced ghost motion@channel=0 events.
+        return events
 
     # ── Format 2: List-based formats (events / alarms / alarm) ─────────────
     event_list = data.get("events", data.get("alarms", data.get("alarm", [])))
