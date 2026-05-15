@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import voluptuous as vol
 from aiohttp import web
 
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.webhook import (
     async_register as webhook_register,
     async_unregister as webhook_unregister,
@@ -1272,8 +1273,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    # Register webhook for NVR EventPush
+    # Register webhook for NVR EventPush (idempotent: previous setup may have
+    # crashed *after* the webhook was registered but *before* completing setup,
+    # in which case async_unload_entry never ran and the handler is still
+    # registered — re-registering would otherwise raise ValueError).
     webhook_id = _get_webhook_id(entry)
+    try:
+        webhook_unregister(hass, webhook_id)
+    except Exception:  # noqa: BLE001 — not registered, nothing to clean
+        pass
     webhook_register(
         hass,
         DOMAIN,
@@ -1430,10 +1438,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_register_talk_view(hass)
         www_path = Path(__file__).parent / "www"
         if www_path.is_dir():
-            hass.http.register_static_path(
-                f"/{DOMAIN}",
-                str(www_path),
-                cache_headers=True,
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(f"/{DOMAIN}", str(www_path), True)]
             )
         hass.data[_talk_flag] = True
 
