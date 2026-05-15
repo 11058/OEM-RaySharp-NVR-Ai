@@ -25,6 +25,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 import homeassistant.util.dt as dt_util
 
+from .api_client import RaySharpNVRConnectionError
 from .const import (
     ALARM_TYPE_FACE,
     ALARM_TYPE_PERSON,
@@ -33,11 +34,13 @@ from .const import (
     API_AI_FACES_GET_BY_INDEX,
     API_AI_OBJECTS_GET_BY_INDEX,
     API_AI_VHD_GET,
+    API_SNAPSHOT,
     CONF_SNAPSHOT_HISTORY_COUNT,
     DATA_CHANNEL_INFO,
     DATA_DEVICE_INFO,
     DEFAULT_SNAPSHOT_HISTORY_COUNT,
     DOMAIN,
+    EVENT_DOORBELL,
     EVENT_SNAPSHOT,
     STORAGE_KEY_SNAPSHOTS_PREFIX,
     STORAGE_VERSION,
@@ -542,6 +545,99 @@ class RaySharpSnapshotImage(RaySharpChannelEntity, ImageEntity):
         return self._extra
 
 
+class RaySharpDoorbellSnapshotImage(RaySharpChannelEntity, ImageEntity):
+    """Image entity holding the frame captured at the moment of a doorbell ring.
+
+    On every EVENT_DOORBELL with ringing=True we call /API/Snapshot/Get for the
+    matching channel and cache the JPEG bytes. The entity is disabled by default
+    in the registry — users enable it for channels that actually host a doorbell.
+    """
+
+    _attr_content_type = "image/jpeg"
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator: RaySharpNVRCoordinator,
+        channel_num: int,
+        channel_name: str,
+    ) -> None:
+        """Initialize the doorbell snapshot image entity."""
+        RaySharpChannelEntity.__init__(self, coordinator, channel_num, channel_name)
+        ImageEntity.__init__(self, coordinator.hass)
+
+        device_data = coordinator.data.get(DATA_DEVICE_INFO, {}) or {}
+        mac = device_data.get("mac_addr", "unknown")
+        self._attr_unique_id = f"{mac}_ch{channel_num}_doorbell_snapshot"
+        self._attr_translation_key = "doorbell_snapshot"
+        self._attr_name = "Doorbell Snapshot"
+        self._attr_icon = "mdi:doorbell-video"
+        self._image_bytes: bytes | None = None
+        self._attr_image_last_updated: datetime | None = None
+        self._extra: dict[str, Any] = {}
+
+    async def async_added_to_hass(self) -> None:
+        """Register doorbell event listener."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_DOORBELL, self._handle_doorbell)
+        )
+
+    @callback
+    def _handle_doorbell(self, event: Any) -> None:
+        """Trigger snapshot capture on ring start."""
+        data = event.data
+        if data.get("channel") != self._channel_num:
+            return
+        if not data.get("ringing"):
+            return
+        # Snapshot fetch is I/O — schedule it without blocking the event loop.
+        self.hass.async_create_task(self._async_capture(data.get("timestamp")))
+
+    async def _async_capture(self, timestamp: Any) -> None:
+        """Fetch a fresh JPEG from the channel and update entity state."""
+        payload = {
+            "channel": f"CH{self._channel_num}",
+            "snapshot_resolution": "1280 x 720",
+            "reset_session_timeout": False,
+        }
+        try:
+            response = await self.coordinator.client.async_api_call(
+                API_SNAPSHOT, payload
+            )
+        except RaySharpNVRConnectionError as err:
+            _LOGGER.warning(
+                "Doorbell snapshot failed on CH%d: %s", self._channel_num, err
+            )
+            return
+
+        snap = response.get("data", response) if isinstance(response, dict) else {}
+        img_b64 = snap.get("ima_data", "")
+        if not img_b64:
+            _LOGGER.debug("Doorbell snapshot empty payload on CH%d", self._channel_num)
+            return
+        try:
+            self._image_bytes = base64.b64decode(img_b64)
+        except Exception:
+            _LOGGER.warning(
+                "Doorbell snapshot base64 decode failed on CH%d", self._channel_num
+            )
+            return
+
+        self._attr_image_last_updated = dt_util.utcnow()
+        self._extra = {"ring_timestamp": timestamp} if timestamp else {}
+        self.async_write_ha_state()
+
+    async def async_image(self) -> bytes | None:
+        """Return the last doorbell snapshot bytes."""
+        return self._image_bytes
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        return self._extra
+
+
 # ─── Platform setup ────────────────────────────────────────────────────────────
 
 async def async_setup_entry(
@@ -565,6 +661,11 @@ async def async_setup_entry(
         # Existing latest-detection entity (real-time, any alarm type)
         entities.append(
             RaySharpSnapshotImage(coordinator, channel_num, channel_name)
+        )
+
+        # Doorbell ring snapshot (disabled by default — enable per doorbell channel)
+        entities.append(
+            RaySharpDoorbellSnapshotImage(coordinator, channel_num, channel_name)
         )
 
         # History image entities: one store per (channel, alarm_type), N slots each

@@ -789,12 +789,15 @@ async def _async_handle_get_snapshot(hass: HomeAssistant, call: ServiceCall) -> 
         event_data = {
             "channel": channel_num,
             "config_entry_id": entry_id,
+            "alarm_type": "manual",
             "img_format": snap_data.get("img_format", "image/jpeg"),
             "img_encodes": snap_data.get("img_encodes", "base64"),
-            "ima_time": snap_data.get("ima_time"),
-            "ima_data": snap_data.get("ima_data", ""),
+            "timestamp": snap_data.get("ima_time"),
+            # Use "image" so the existing RaySharpSnapshotImage entity picks it up
+            # (NVR field is `ima_data` but downstream listeners use `image`).
+            "image": snap_data.get("ima_data", ""),
         }
-        hass.bus.async_fire("raysharp_nvr_snapshot", event_data)
+        hass.bus.async_fire(EVENT_SNAPSHOT, event_data)
         _LOGGER.debug("Snapshot captured for channel %d", channel_num)
     except RaySharpNVRConnectionError as err:
         _LOGGER.error("Failed to get snapshot for channel %d: %s", channel_num, err)
@@ -1384,96 +1387,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coordinator.async_add_listener(_check_event_push_enabled)
         )
 
-    # Register services (idempotent — only register once across all entries)
+    # Register services (idempotent — only register once across all entries).
+    # NOTE: handlers must be true coroutine functions, not sync lambdas that
+    # return a coroutine.  HA's HassJob inspects the callable via
+    # asyncio.iscoroutinefunction() — a lambda evaluates as sync, even when
+    # it returns a coroutine, and HA falls back to hass.async_create_task to
+    # schedule the orphan coroutine.  Calling async_create_task from a thread
+    # context (REST/WS service dispatch) then raises RuntimeError.
     if not hass.services.has_service(DOMAIN, SERVICE_PTZ_CONTROL):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_PTZ_CONTROL,
-            lambda call: hass.async_create_task(
-                _async_handle_ptz_control(hass, call)
-            ),
-            schema=PTZ_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_GET_SNAPSHOT,
-            lambda call: hass.async_create_task(
-                _async_handle_get_snapshot(hass, call)
-            ),
-            schema=SNAPSHOT_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_TRIGGER_ALARM_OUTPUT,
-            lambda call: hass.async_create_task(
-                _async_handle_trigger_alarm_output(hass, call)
-            ),
-            schema=ALARM_OUTPUT_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SEARCH_RECORDS,
-            lambda call: hass.async_create_task(
-                _async_handle_search_records(hass, call)
-            ),
-            schema=SEARCH_RECORDS_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SEARCH_PLATES,
-            lambda call: hass.async_create_task(
-                _async_handle_search_plates(hass, call)
-            ),
-            schema=SEARCH_PLATES_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SEARCH_FACES,
-            lambda call: hass.async_create_task(
-                _async_handle_search_faces(hass, call)
-            ),
-            schema=SEARCH_FACES_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_GET_PLATE_DATABASE_INFO,
-            lambda call: hass.async_create_task(
-                _async_handle_get_plate_database_info(hass, call)
-            ),
-            schema=GET_PLATE_DB_INFO_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_CONFIGURE_EVENT_PUSH,
-            lambda call: hass.async_create_task(
-                _async_handle_configure_event_push(hass, call)
-            ),
-            schema=CONFIGURE_EVENT_PUSH_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_CLEAR_DETECTIONS,
-            lambda call: hass.async_create_task(
-                _async_handle_clear_detections(hass, call)
-            ),
-            schema=CLEAR_DETECTIONS_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_DOORBELL_ANSWER,
-            lambda call: hass.async_create_task(
-                _async_handle_doorbell_answer(hass, call)
-            ),
-            schema=DOORBELL_SERVICE_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_DOORBELL_HANG_UP,
-            lambda call: hass.async_create_task(
-                _async_handle_doorbell_hang_up(hass, call)
-            ),
-            schema=DOORBELL_SERVICE_SCHEMA,
-        )
+
+        async def _svc_ptz(call: ServiceCall) -> None:
+            await _async_handle_ptz_control(hass, call)
+
+        async def _svc_get_snapshot(call: ServiceCall) -> None:
+            await _async_handle_get_snapshot(hass, call)
+
+        async def _svc_trigger_alarm_output(call: ServiceCall) -> None:
+            await _async_handle_trigger_alarm_output(hass, call)
+
+        async def _svc_search_records(call: ServiceCall) -> None:
+            await _async_handle_search_records(hass, call)
+
+        async def _svc_search_plates(call: ServiceCall) -> None:
+            await _async_handle_search_plates(hass, call)
+
+        async def _svc_search_faces(call: ServiceCall) -> None:
+            await _async_handle_search_faces(hass, call)
+
+        async def _svc_get_plate_db_info(call: ServiceCall) -> None:
+            await _async_handle_get_plate_database_info(hass, call)
+
+        async def _svc_configure_event_push(call: ServiceCall) -> None:
+            await _async_handle_configure_event_push(hass, call)
+
+        async def _svc_clear_detections(call: ServiceCall) -> None:
+            await _async_handle_clear_detections(hass, call)
+
+        async def _svc_doorbell_answer(call: ServiceCall) -> None:
+            await _async_handle_doorbell_answer(hass, call)
+
+        async def _svc_doorbell_hang_up(call: ServiceCall) -> None:
+            await _async_handle_doorbell_hang_up(hass, call)
+
+        hass.services.async_register(DOMAIN, SERVICE_PTZ_CONTROL, _svc_ptz, schema=PTZ_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_GET_SNAPSHOT, _svc_get_snapshot, schema=SNAPSHOT_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_TRIGGER_ALARM_OUTPUT, _svc_trigger_alarm_output, schema=ALARM_OUTPUT_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_SEARCH_RECORDS, _svc_search_records, schema=SEARCH_RECORDS_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_SEARCH_PLATES, _svc_search_plates, schema=SEARCH_PLATES_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_SEARCH_FACES, _svc_search_faces, schema=SEARCH_FACES_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_GET_PLATE_DATABASE_INFO, _svc_get_plate_db_info, schema=GET_PLATE_DB_INFO_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_CONFIGURE_EVENT_PUSH, _svc_configure_event_push, schema=CONFIGURE_EVENT_PUSH_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_CLEAR_DETECTIONS, _svc_clear_detections, schema=CLEAR_DETECTIONS_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_DOORBELL_ANSWER, _svc_doorbell_answer, schema=DOORBELL_SERVICE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_DOORBELL_HANG_UP, _svc_doorbell_hang_up, schema=DOORBELL_SERVICE_SCHEMA)
 
     # Register WebSocket view + Lovelace card static files (once per process)
     _talk_flag = f"{DOMAIN}_talk_registered"

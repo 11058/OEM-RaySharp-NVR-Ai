@@ -33,3 +33,8 @@ htmlcov/
 
 # Home Assistant testing
 *.log
+
+# Native SDK libraries — too large for git, must be obtained separately
+custom_components/raysharp_nvr/lib/arm64/*.so
+custom_components/raysharp_nvr/lib/x86_64/*.so
+custom_components/raysharp_nvr/lib/arm32/*.so
