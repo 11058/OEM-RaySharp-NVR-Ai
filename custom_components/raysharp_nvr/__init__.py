@@ -644,19 +644,35 @@ def _parse_doorbell_payload(payload: Any) -> list[dict[str, Any]]:
                 continue
             channel_str = str(ch_alarm.get("channel", ""))
             channel_num = _channel_str_to_int(channel_str)
+
+            # Format A — documented `talkback_alarm[]` (intercom-style devices):
+            #   {"channel":"CH1","talkback_alarm":[{"channel":1,"talkback_close":false,...}]}
             talkback_list = ch_alarm.get("talkback_alarm", [])
-            if not isinstance(talkback_list, list) or not talkback_list:
-                continue
-            for tb in talkback_list:
-                if not isinstance(tb, dict):
-                    continue
-                talkback_close = bool(tb.get("talkback_close", False))
+            if isinstance(talkback_list, list) and talkback_list:
+                for tb in talkback_list:
+                    if not isinstance(tb, dict):
+                        continue
+                    talkback_close = bool(tb.get("talkback_close", False))
+                    results.append({
+                        "channel": channel_num,
+                        "channel_str": channel_str,
+                        "ringing": not talkback_close,
+                        "intercom_channel": tb.get("channel"),
+                        "error_code": tb.get("error_code", ""),
+                        "timestamp": timestamp,
+                    })
+
+            # Format B — `doorbell_call` bool (RaySharp video-doorbell firmware,
+            # also relayed by the NVR for its IPC channel hosting the doorbell):
+            #   {"channel":"CH1","doorbell_call":true}   → ring start
+            #   {"channel":"CH1","doorbell_call":false}  → ring end
+            if "doorbell_call" in ch_alarm:
                 results.append({
                     "channel": channel_num,
                     "channel_str": channel_str,
-                    "ringing": not talkback_close,
-                    "intercom_channel": tb.get("channel"),
-                    "error_code": tb.get("error_code", ""),
+                    "ringing": bool(ch_alarm.get("doorbell_call")),
+                    "intercom_channel": None,
+                    "error_code": "",
                     "timestamp": timestamp,
                 })
     return results
