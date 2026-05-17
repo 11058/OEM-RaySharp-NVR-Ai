@@ -808,10 +808,11 @@ async def _async_handle_get_snapshot(hass: HomeAssistant, call: ServiceCall) -> 
             "alarm_type": "manual",
             "img_format": snap_data.get("img_format", "image/jpeg"),
             "img_encodes": snap_data.get("img_encodes", "base64"),
-            "timestamp": snap_data.get("ima_time"),
-            # Use "image" so the existing RaySharpSnapshotImage entity picks it up
-            # (NVR field is `ima_data` but downstream listeners use `image`).
-            "image": snap_data.get("ima_data", ""),
+            "timestamp": snap_data.get("img_time"),
+            # Use "image" so the existing RaySharpSnapshotImage entity picks it
+            # up — NVR returns the JPEG bytes under `img_data` (not `ima_data`
+            # as we used previously; the docs differ).
+            "image": snap_data.get("img_data") or snap_data.get("ima_data", ""),
         }
         hass.bus.async_fire(EVENT_SNAPSHOT, event_data)
         _LOGGER.debug("Snapshot captured for channel %d", channel_num)

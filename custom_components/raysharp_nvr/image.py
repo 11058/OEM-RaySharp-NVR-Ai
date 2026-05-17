@@ -10,6 +10,7 @@ Provides image entities per channel:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -595,24 +596,48 @@ class RaySharpDoorbellSnapshotImage(RaySharpChannelEntity, ImageEntity):
         self.hass.async_create_task(self._async_capture(data.get("timestamp")))
 
     async def _async_capture(self, timestamp: Any) -> None:
-        """Fetch a fresh JPEG from the channel and update entity state."""
+        """Fetch a fresh JPEG and update entity state.
+
+        While the doorbell is actively ringing, /API/Snapshot/Get tends to
+        return HTTP 400 — the device blocks concurrent snapshot requests
+        during the ring/talk session.  Retry a few times so we still grab a
+        frame within the ring window (typically 10 s before the firmware
+        auto-cancels with doorbell_call:false).
+        """
         payload = {
             "channel": f"CH{self._channel_num}",
             "snapshot_resolution": "1280 x 720",
             "reset_session_timeout": False,
         }
-        try:
-            response = await self.coordinator.client.async_api_call(
-                API_SNAPSHOT, payload
-            )
-        except RaySharpNVRConnectionError as err:
+        # Total ≈ 11.5 s — fits inside the ~10 s ring window most firmwares use.
+        delays = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0)
+        response: dict[str, Any] | None = None
+        last_err: Any = None
+        for delay in delays:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                response = await self.coordinator.client.async_api_call(
+                    API_SNAPSHOT, payload
+                )
+                break
+            except RaySharpNVRConnectionError as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Doorbell snapshot CH%d attempt failed: %s — retrying",
+                    self._channel_num, err,
+                )
+        else:
             _LOGGER.warning(
-                "Doorbell snapshot failed on CH%d: %s", self._channel_num, err
+                "Doorbell snapshot CH%d gave up after %d attempts: %s",
+                self._channel_num, len(delays), last_err,
             )
             return
 
         snap = response.get("data", response) if isinstance(response, dict) else {}
-        img_b64 = snap.get("ima_data", "")
+        # NVR returns the JPEG under `img_data`; fall back to `ima_data` for
+        # any firmware that uses the field-name from older docs.
+        img_b64 = snap.get("img_data") or snap.get("ima_data", "")
         if not img_b64:
             _LOGGER.debug("Doorbell snapshot empty payload on CH%d", self._channel_num)
             return

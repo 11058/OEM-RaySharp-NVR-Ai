@@ -23,12 +23,15 @@ from .const import (
     CONF_PASSWORD,
     CONF_PORT,
     CONF_SNAPSHOT_HISTORY_COUNT,
+    CONF_STREAM_TYPE,
     CONF_USERNAME,
     DEFAULT_EVENT_PUSH_AUTO_CONFIGURE,
     DEFAULT_EVENT_TIMEOUT,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SNAPSHOT_HISTORY_COUNT,
+    DEFAULT_STREAM_TYPE,
+    STREAM_TYPES,
     DEFAULT_USERNAME,
     DOMAIN,
 )
@@ -176,6 +179,9 @@ class RaySharpNVROptionsFlow(OptionsFlow):
         current_history_count = self._config_entry.options.get(
             CONF_SNAPSHOT_HISTORY_COUNT, DEFAULT_SNAPSHOT_HISTORY_COUNT
         )
+        current_stream_type = self._config_entry.options.get(
+            CONF_STREAM_TYPE, DEFAULT_STREAM_TYPE
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -196,6 +202,13 @@ class RaySharpNVROptionsFlow(OptionsFlow):
                         CONF_SNAPSHOT_HISTORY_COUNT,
                         default=current_history_count,
                     ): vol.All(int, vol.Range(min=1, max=10)),
+                    # Stream quality. Use "sub" when the NVR user account
+                    # only has substream Live View permissions (mainstream
+                    # would 401).
+                    vol.Required(
+                        CONF_STREAM_TYPE,
+                        default=current_stream_type,
+                    ): vol.In(list(STREAM_TYPES)),
                 }
             ),
         )

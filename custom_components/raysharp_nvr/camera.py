@@ -3,15 +3,56 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote, urlparse, urlunparse
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DATA_CHANNEL_INFO, DATA_DEVICE_INFO, DATA_RTSP_URLS, DOMAIN
+from .const import (
+    CONF_PASSWORD,
+    CONF_STREAM_TYPE,
+    CONF_USERNAME,
+    DATA_CHANNEL_INFO,
+    DATA_DEVICE_INFO,
+    DATA_RTSP_URLS,
+    DEFAULT_STREAM_TYPE,
+    DOMAIN,
+)
 from .coordinator import RaySharpNVRCoordinator
 from .entity import RaySharpChannelEntity, channel_num_from_str
+
+
+_STREAM_TYPE_KEY = {
+    "main": "mainstream_url",
+    "sub": "substream_url",
+    "mobile": "mobile_stream_url",
+}
+
+
+def _embed_creds(url: str, username: str, password: str) -> str:
+    """Inject HTTP Digest creds into an RTSP URL.
+
+    NVR-published URLs are credential-less (rtsp://host:554/...).  HA's stream
+    component cannot prompt for auth, so the username and password are
+    pre-embedded here; ffmpeg picks Digest automatically when challenged.
+    Special chars in the password are URL-escaped.
+    """
+    if not url or not username:
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    user_quoted = quote(username, safe="")
+    pass_quoted = quote(password or "", safe="")
+    auth = f"{user_quoted}:{pass_quoted}" if password else user_quoted
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    netloc = f"{auth}@{host}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def _get_channel_list(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -32,11 +73,17 @@ def _get_channel_list(data: dict[str, Any]) -> list[dict[str, Any]]:
     return channels
 
 
-def _get_rtsp_urls(data: dict[str, Any]) -> dict[int, str]:
+def _get_rtsp_urls(data: dict[str, Any], stream_type: str = DEFAULT_STREAM_TYPE) -> dict[int, str]:
     """Extract RTSP URLs mapped by channel index (0-based)."""
     rtsp_data = data.get(DATA_RTSP_URLS)
     if not rtsp_data:
         return {}
+
+    primary_key = _STREAM_TYPE_KEY.get(stream_type, "mainstream_url")
+    fallback_keys = [
+        k for k in ("mainstream_url", "substream_url", "mobile_stream_url")
+        if k != primary_key
+    ]
 
     urls: dict[int, str] = {}
 
@@ -48,7 +95,12 @@ def _get_rtsp_urls(data: dict[str, Any]) -> dict[int, str]:
                 if not isinstance(item, dict):
                     continue
                 ch_str = str(item.get("channel", ""))
-                url = item.get("mainstream_url", item.get("substream_url", ""))
+                url = item.get(primary_key, "")
+                if not url:
+                    for fk in fallback_keys:
+                        url = item.get(fk, "")
+                        if url:
+                            break
                 # Convert "CH1" → index 0, "CH2" → index 1, etc.
                 if ch_str.upper().startswith("CH"):
                     try:
@@ -96,8 +148,12 @@ async def async_setup_entry(
     """Set up RaySharp NVR cameras."""
     coordinator: RaySharpNVRCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    stream_type = entry.options.get(CONF_STREAM_TYPE, DEFAULT_STREAM_TYPE)
+    username = entry.data.get(CONF_USERNAME, "")
+    password = entry.data.get(CONF_PASSWORD, "")
+
     channels = _get_channel_list(coordinator.data)
-    rtsp_urls = _get_rtsp_urls(coordinator.data)
+    rtsp_urls = _get_rtsp_urls(coordinator.data, stream_type)
 
     entities: list[RaySharpCamera] = []
     for i, channel in enumerate(channels):
@@ -110,13 +166,16 @@ async def async_setup_entry(
         # Use channel_num - 1 as the index because _get_rtsp_urls maps
         # "CH{N}" → index N-1. Using the enumerate index would break when
         # channels don't start at CH1 (e.g. first online channel is CH2).
-        rtsp_url = rtsp_urls.get(channel_num - 1, "")
+        rtsp_url = _embed_creds(rtsp_urls.get(channel_num - 1, ""), username, password)
         entities.append(
             RaySharpCamera(
                 coordinator,
                 channel_num=channel_num,
                 channel_name=channel_name,
                 rtsp_url=rtsp_url,
+                stream_type=stream_type,
+                username=username,
+                password=password,
             )
         )
 
@@ -134,11 +193,17 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         channel_num: int,
         channel_name: str,
         rtsp_url: str,
+        stream_type: str = DEFAULT_STREAM_TYPE,
+        username: str = "",
+        password: str = "",
     ) -> None:
         """Initialize the camera."""
         RaySharpChannelEntity.__init__(self, coordinator, channel_num, channel_name)
         Camera.__init__(self)
         self._rtsp_url = rtsp_url
+        self._stream_type = stream_type
+        self._username = username
+        self._password = password
         # _attr_name = None → entity is the "main feature" of the channel device;
         # entity_id becomes camera.ch17_cam03 (just the device name slug)
         self._attr_name = None
@@ -162,8 +227,15 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         return self.coordinator.last_update_success and self.is_streaming
 
     async def stream_source(self) -> str | None:
-        """Return the RTSP stream source."""
-        # Refresh RTSP URL from coordinator data using channel_num - 1 index
-        rtsp_urls = _get_rtsp_urls(self.coordinator.data)
-        url = rtsp_urls.get(self._channel_num - 1, self._rtsp_url)
-        return url if url else None
+        """Return the RTSP stream source.
+
+        Refreshes the URL from coordinator data and embeds creds — NVR returns
+        credential-less URLs but HA's stream component has no way to prompt
+        for them.  When the options flow has switched stream_type, this is
+        also where the new selection takes effect after a reload.
+        """
+        rtsp_urls = _get_rtsp_urls(self.coordinator.data, self._stream_type)
+        url = rtsp_urls.get(self._channel_num - 1) or self._rtsp_url
+        if not url:
+            return None
+        return _embed_creds(url, self._username, self._password)

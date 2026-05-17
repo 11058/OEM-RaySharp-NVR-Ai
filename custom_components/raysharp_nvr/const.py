@@ -10,6 +10,7 @@ CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_EVENT_PUSH_AUTO_CONFIGURE = "event_push_auto_configure"
 CONF_EVENT_TIMEOUT = "event_timeout"
+CONF_STREAM_TYPE = "stream_type"
 
 # Defaults
 DEFAULT_PORT = 80
@@ -17,6 +18,8 @@ DEFAULT_SCAN_INTERVAL = 30
 DEFAULT_USERNAME = "admin"
 DEFAULT_EVENT_TIMEOUT = 30
 DEFAULT_EVENT_PUSH_AUTO_CONFIGURE = True
+DEFAULT_STREAM_TYPE = "main"
+STREAM_TYPES = ("main", "sub", "mobile")
 
 # ─── Auth & Session ────────────────────────────────────────────────────────────
 API_LOGIN = "/API/Web/Login"
