@@ -84,19 +84,28 @@ def _parse_ts_to_dt(ts: Any) -> datetime | None:
     """Convert a NVR timestamp to an aware UTC datetime.
 
     NVR timestamps are in local (device) time — the same timezone as HA is
-    configured for.  We therefore interpret the naive string as the HA local
-    timezone and convert to UTC so HA displays the correct local time.
+    configured for.  Both string ("YYYY-MM-DD HH:MM:SS") and numeric "Unix
+    epoch" values produced by the firmware are computed from local wall-clock
+    time as if it were UTC, so we re-tag the resulting naive datetime with
+    HA's local timezone and convert to true UTC.
     """
     if ts is None:
         return None
-    if isinstance(ts, (int, float)):
+    if isinstance(ts, (int, float)) or (
+        isinstance(ts, str) and ts.lstrip("-").replace(".", "", 1).isdigit()
+    ):
         try:
-            return datetime.fromtimestamp(float(ts), tz=dt_util.UTC)
+            # fromtimestamp(ts, tz=UTC) decodes the epoch as if it were UTC;
+            # the NVR actually encoded local time, so the resulting naive
+            # value is the device's wall-clock reading — localise it.
+            naive = datetime.fromtimestamp(float(ts), tz=dt_util.UTC).replace(
+                tzinfo=None
+            )
+            return dt_util.as_utc(naive.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE))
         except (ValueError, OSError):
             return None
     try:
         naive_dt = datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
-        # Localise as HA timezone → convert to UTC
         return dt_util.as_utc(naive_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE))
     except (ValueError, AttributeError):
         pass
