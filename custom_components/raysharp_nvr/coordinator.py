@@ -89,7 +89,9 @@ from .const import (
     DATA_RECORD_INFO,
     DATA_RTSP_URLS,
     DATA_SYSTEM_INFO,
+    CONF_SNAPSHOT_HISTORY_COUNT,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SNAPSHOT_HISTORY_COUNT,
     DOMAIN,
 )
 
@@ -173,10 +175,12 @@ _AI_OBJECT_TYPES = [1, 2]  # 1 = person, 2 = vehicle
 # Remember enough snapshot ids to recognise a record the push path already
 # delivered, without growing without bound.
 _SEEN_SNAPS_MAX = 512
-# On startup, replay this many stored detections per channel.  Done per channel
-# rather than as a flat tail of the result set: one busy camera can account for
-# every recent record, leaving every other card empty.
-AI_POLL_BACKFILL_PER_CHANNEL = 3
+# On startup, replay stored detections per channel.  Done per channel rather
+# than as a flat tail of the result set: one busy camera can account for every
+# recent record, leaving every other card empty.  The depth follows the
+# configured history so the cards start full rather than part-filled, with a
+# ceiling to bound the startup cost — every row carries a JPEG.
+AI_BACKFILL_MAX_PER_CHANNEL = 24
 
 
 def channel_num_from_str(ch_str: str, fallback: int) -> int:
@@ -659,6 +663,22 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         items = self._extract_data(records).get("SnapedObjInfo") or []
         self._dispatch_ai_records(items)
 
+    def _backfill_depth(self) -> int:
+        """Return how many stored detections to replay per channel.
+
+        Each channel keeps a separate history per object type, so filling the
+        cards needs roughly history × types rows — a channel that only ever
+        sees people simply has fewer to give.
+        """
+        history = self.config_entry.options.get(
+            CONF_SNAPSHOT_HISTORY_COUNT, DEFAULT_SNAPSHOT_HISTORY_COUNT
+        )
+        try:
+            history = int(history)
+        except (TypeError, ValueError):
+            history = DEFAULT_SNAPSHOT_HISTORY_COUNT
+        return min(max(history, 1) * len(_AI_OBJECT_TYPES), AI_BACKFILL_MAX_PER_CHANNEL)
+
     async def _async_backfill_channels(self) -> None:
         """Replay each channel's most recent detections once, at startup.
 
@@ -667,6 +687,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         image: a single busy channel can own every recent record.
         """
         channels = get_channel_list(self.data or {})
+        depth = self._backfill_depth()
         for index, channel in enumerate(channels):
             raw = channel.get("channel", "") if isinstance(channel, dict) else ""
             number = channel_num_from_str(raw, index + 1)
@@ -685,7 +706,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 count = self._extract_data(search).get("Count")
                 if not isinstance(count, int) or count <= 0:
                     continue
-                take = min(count, AI_POLL_BACKFILL_PER_CHANNEL)
+                take = min(count, depth)
                 records = await self.client.async_api_call(
                     API_AI_OBJECTS_GET_BY_INDEX,
                     {
