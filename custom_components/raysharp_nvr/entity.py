@@ -24,7 +24,9 @@ from .const import (
     DOMAIN,
     MANUFACTURER,
 )
-from .coordinator import RaySharpNVRCoordinator
+from .coordinator import RaySharpNVRCoordinator, channel_num_from_str
+
+__all__ = ["RaySharpChannelEntity", "RaySharpEntity", "channel_num_from_str"]
 
 
 def _get_detection_enabled(
@@ -69,20 +71,6 @@ def _get_detection_enabled(
     if alarm_type == ALARM_TYPE_INTRUSION:
         return _ch_switch(DATA_AI_INTRUSION_SETUP)
     return None
-
-
-def channel_num_from_str(ch_str: str, fallback: int) -> int:
-    """Convert 'CH17' → 17, '17' → 17, or return fallback."""
-    s = str(ch_str).strip()
-    if s.upper().startswith("CH"):
-        try:
-            return int(s[2:])
-        except ValueError:
-            pass
-    try:
-        return int(s)
-    except (ValueError, TypeError):
-        return fallback
 
 
 class RaySharpEntity(CoordinatorEntity[RaySharpNVRCoordinator]):

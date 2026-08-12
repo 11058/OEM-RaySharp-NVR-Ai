@@ -43,7 +43,7 @@ from .const import (
     EVENT_ALARM,
     EVENT_DOORBELL,
 )
-from .coordinator import RaySharpNVRCoordinator
+from .coordinator import RaySharpNVRCoordinator, get_channel_list as _get_channel_list
 from .entity import RaySharpChannelEntity, RaySharpEntity, _get_detection_enabled, channel_num_from_str
 
 
@@ -75,24 +75,6 @@ NVR_BINARY_SENSORS: tuple[RaySharpBinarySensorDescription, ...] = (
         ) if data.get(DATA_DISARMING) is not None else None,
     ),
 )
-
-
-def _get_channel_list(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract channel list from coordinator data."""
-    channel_data = data.get(DATA_CHANNEL_INFO)
-    if not channel_data:
-        return []
-    if isinstance(channel_data, dict):
-        channels = channel_data.get("channel_param", {}).get("items", [])
-        if not channels:
-            channels = channel_data.get("channels", channel_data.get("channel", []))
-    elif isinstance(channel_data, list):
-        channels = channel_data
-    else:
-        return []
-    if not isinstance(channels, list):
-        channels = [channels]
-    return channels
 
 
 # (alarm_type, key_suffix, translation_key, device_class)

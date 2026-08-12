@@ -15,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api_client import (
+    RaySharpNVRApiError,
     RaySharpNVRAuthError,
     RaySharpNVRClient,
     RaySharpNVRConnectionError,
@@ -162,10 +163,6 @@ AI_POLL_INTERVAL = 10.0
 # Bursts happen (hundreds of detections in a couple of minutes); cap the
 # per-poll fetch so one busy minute can't pull megabytes of JPEGs at once.
 AI_POLL_MAX_BATCH = 20
-# Replay a few stored detections on startup.  Without it the image entities sit
-# empty until something new walks past a camera, which on a quiet site can be
-# hours — indistinguishable from the integration being broken.
-AI_POLL_BACKFILL = 5
 # A window wide enough to never need the NVR's clock, which runs in its own
 # local time and does not match Home Assistant's.
 _AI_SEARCH_WINDOW = {
@@ -176,6 +173,42 @@ _AI_OBJECT_TYPES = [1, 2]  # 1 = person, 2 = vehicle
 # Remember enough snapshot ids to recognise a record the push path already
 # delivered, without growing without bound.
 _SEEN_SNAPS_MAX = 512
+# On startup, replay this many stored detections per channel.  Done per channel
+# rather than as a flat tail of the result set: one busy camera can account for
+# every recent record, leaving every other card empty.
+AI_POLL_BACKFILL_PER_CHANNEL = 3
+
+
+def channel_num_from_str(ch_str: str, fallback: int) -> int:
+    """Convert 'CH17' → 17, '17' → 17, or return fallback."""
+    s = str(ch_str).strip()
+    if s.upper().startswith("CH"):
+        try:
+            return int(s[2:])
+        except ValueError:
+            pass
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return fallback
+
+
+def get_channel_list(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract the channel list from coordinator data."""
+    channel_data = data.get(DATA_CHANNEL_INFO)
+    if not channel_data:
+        return []
+    if isinstance(channel_data, dict):
+        channels = channel_data.get("channel_param", {}).get("items", [])
+        if not channels:
+            channels = channel_data.get("channels", channel_data.get("channel", []))
+    elif isinstance(channel_data, list):
+        channels = channel_data
+    else:
+        return []
+    if not isinstance(channels, list):
+        channels = [channels]
+    return channels
 
 
 class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -543,6 +576,18 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except asyncio.CancelledError:
                 _LOGGER.debug("AI detection polling cancelled")
                 break
+            except RaySharpNVRApiError as err:
+                self._ai_last_error = str(err)
+                if err.error_code == "no_permission":
+                    # Rights don't change under us; retrying every few seconds
+                    # would just fill the log forever.
+                    _LOGGER.info(
+                        "NVR account may not search AI detections, so they "
+                        "cannot be polled — grant it AI rights, or rely on "
+                        "the NVR's own event push. Polling stopped."
+                    )
+                    break
+                _LOGGER.debug("AI detection poll refused: %s", err)
             except Exception as err:  # noqa: BLE001 — loop must survive anything
                 self._ai_last_error = str(err)
                 _LOGGER.debug("AI detection poll failed: %s", err)
@@ -570,14 +615,14 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
 
             if self._ai_cursor is None:
-                # First poll — rewind a little so the entities start populated
-                # instead of waiting for the next person to walk past.
-                self._ai_cursor = max(0, total - AI_POLL_BACKFILL)
+                # First poll: start tracking from here, then populate each
+                # camera from history so nothing waits for the next passer-by.
+                self._ai_cursor = total
                 _LOGGER.debug(
-                    "AI detection polling armed at %d stored records, "
-                    "backfilling the newest %d",
-                    total, total - self._ai_cursor,
+                    "AI detection polling armed at %d stored records", total
                 )
+                await self._async_backfill_channels()
+                return
             if total < self._ai_cursor:
                 # The NVR purged old rows, so every index shifted; re-baseline.
                 _LOGGER.debug(
@@ -613,6 +658,52 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         items = self._extract_data(records).get("SnapedObjInfo") or []
         self._dispatch_ai_records(items)
+
+    async def _async_backfill_channels(self) -> None:
+        """Replay each channel's most recent detections once, at startup.
+
+        Caller already holds the search lock.  Searching per channel costs one
+        round trip each but is the only way to give every camera a starting
+        image: a single busy channel can own every recent record.
+        """
+        channels = get_channel_list(self.data or {})
+        for index, channel in enumerate(channels):
+            raw = channel.get("channel", "") if isinstance(channel, dict) else ""
+            number = channel_num_from_str(raw, index + 1)
+            try:
+                search = await self.client.async_api_call(
+                    API_AI_OBJECTS_SEARCH,
+                    {
+                        "MsgId": None,
+                        **_AI_SEARCH_WINDOW,
+                        "Chn": [number - 1],  # the NVR indexes channels from 0
+                        "SortType": 1,
+                        "Engine": 0,
+                        "Type": _AI_OBJECT_TYPES,
+                    },
+                )
+                count = self._extract_data(search).get("Count")
+                if not isinstance(count, int) or count <= 0:
+                    continue
+                take = min(count, AI_POLL_BACKFILL_PER_CHANNEL)
+                records = await self.client.async_api_call(
+                    API_AI_OBJECTS_GET_BY_INDEX,
+                    {
+                        "MsgId": None,
+                        "Engine": 0,
+                        "StartIndex": count - take,
+                        "Count": take,
+                        "SimpleInfo": 0,
+                        "WithObjectImage": 1,
+                        "WithBackgroud": 0,
+                    },
+                )
+            except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
+                _LOGGER.debug("AI backfill for CH%d failed: %s", number, err)
+                continue
+            self._dispatch_ai_records(
+                self._extract_data(records).get("SnapedObjInfo") or []
+            )
 
     def _dispatch_ai_records(self, items: list[dict[str, Any]]) -> None:
         """Fire snapshot and alarm events for polled detection records.
