@@ -929,10 +929,37 @@ async def _async_handle_search_plates(
         search_payload["PlatesId"] = plate_filter
 
     try:
-        resp = await coordinator.client.async_api_call(API_AI_PLATES, search_payload)
-        search_data = resp.get("data", resp) if isinstance(resp, dict) else {}
-        count = search_data.get("Count", 0)
-        _LOGGER.debug("Plate search found %d records", count)
+        # GetByIndex pages through whatever the last Search selected, so the
+        # whole search must be atomic against the coordinator's AI polling.
+        all_records: list[dict[str, Any]] = []
+        async with coordinator.ai_search_lock:
+            resp = await coordinator.client.async_api_call(API_AI_PLATES, search_payload)
+            search_data = resp.get("data", resp) if isinstance(resp, dict) else {}
+            count = search_data.get("Count", 0)
+            _LOGGER.debug("Plate search found %d records", count)
+
+            # Retrieve records in pages (max 50 per call)
+            fetch_count = min(count, max_results)
+            page_size = 50
+
+            for start_idx in range(0, fetch_count, page_size):
+                batch = min(page_size, fetch_count - start_idx)
+                get_payload: dict[str, Any] = {
+                    "MsgId": None,
+                    "Engine": 0,
+                    "StartIndex": start_idx,
+                    "Count": batch,
+                    "SimpleInfo": 0,
+                    "WithObjectImage": 1 if include_images else 0,
+                    "WithBackgroud": 0,
+                }
+                get_resp = await coordinator.client.async_api_call(
+                    API_AI_OBJECTS_GET_BY_INDEX, get_payload
+                )
+                get_data = (
+                    get_resp.get("data", get_resp) if isinstance(get_resp, dict) else {}
+                )
+                all_records.extend(get_data.get("SnapedObjInfo", []))
 
         if count == 0:
             hass.bus.async_fire(
@@ -940,29 +967,6 @@ async def _async_handle_search_plates(
                 {"config_entry_id": entry_id, "count": 0, "plates": []},
             )
             return
-
-        # Retrieve records in pages (max 50 per call)
-        fetch_count = min(count, max_results)
-        page_size = 50
-        all_records: list[dict[str, Any]] = []
-
-        for start_idx in range(0, fetch_count, page_size):
-            batch = min(page_size, fetch_count - start_idx)
-            get_payload: dict[str, Any] = {
-                "MsgId": None,
-                "Engine": 0,
-                "StartIndex": start_idx,
-                "Count": batch,
-                "SimpleInfo": 0,
-                "WithObjectImage": 1 if include_images else 0,
-                "WithBackgroud": 0,
-            }
-            get_resp = await coordinator.client.async_api_call(
-                API_AI_OBJECTS_GET_BY_INDEX, get_payload
-            )
-            get_data = get_resp.get("data", get_resp) if isinstance(get_resp, dict) else {}
-            records = get_data.get("SnapedObjInfo", [])
-            all_records.extend(records)
 
         hass.bus.async_fire(
             "raysharp_nvr_plates_result",
@@ -1016,10 +1020,38 @@ async def _async_handle_search_faces(
     }
 
     try:
-        resp = await coordinator.client.async_api_call(API_AI_FACES, search_payload)
-        search_data = resp.get("data", resp) if isinstance(resp, dict) else {}
-        count = search_data.get("Count", 0)
-        _LOGGER.debug("Face search found %d records", count)
+        all_records: list[dict[str, Any]] = []
+        # GetByIndex pages through whatever the last Search selected, so the
+        # whole search must be atomic against the coordinator's AI polling.
+        async with coordinator.ai_search_lock:
+            resp = await coordinator.client.async_api_call(API_AI_FACES, search_payload)
+            search_data = resp.get("data", resp) if isinstance(resp, dict) else {}
+            count = search_data.get("Count", 0)
+            _LOGGER.debug("Face search found %d records", count)
+
+            fetch_count = min(count, max_results)
+            page_size = 50
+
+            for start_idx in range(0, fetch_count, page_size):
+                batch = min(page_size, fetch_count - start_idx)
+                get_payload: dict[str, Any] = {
+                    "Engine": 0,
+                    "MatchedFaces": 1 if matched_only else 0,
+                    "StartIndex": start_idx,
+                    "Count": batch,
+                    "SimpleInfo": 0,
+                    "WithFaceImage": 1 if include_images else 0,
+                    "WithBodyImage": 0,
+                    "WithBackgroud": 0,
+                    "WithFeature": 0,
+                }
+                get_resp = await coordinator.client.async_api_call(
+                    API_AI_FACES_GET_BY_INDEX, get_payload
+                )
+                get_data = (
+                    get_resp.get("data", get_resp) if isinstance(get_resp, dict) else {}
+                )
+                all_records.extend(get_data.get("SnapedFaceInfo", []))
 
         if count == 0:
             hass.bus.async_fire(
@@ -1027,30 +1059,6 @@ async def _async_handle_search_faces(
                 {"config_entry_id": entry_id, "count": 0, "faces": []},
             )
             return
-
-        fetch_count = min(count, max_results)
-        page_size = 50
-        all_records: list[dict[str, Any]] = []
-
-        for start_idx in range(0, fetch_count, page_size):
-            batch = min(page_size, fetch_count - start_idx)
-            get_payload: dict[str, Any] = {
-                "Engine": 0,
-                "MatchedFaces": 1 if matched_only else 0,
-                "StartIndex": start_idx,
-                "Count": batch,
-                "SimpleInfo": 0,
-                "WithFaceImage": 1 if include_images else 0,
-                "WithBodyImage": 0,
-                "WithBackgroud": 0,
-                "WithFeature": 0,
-            }
-            get_resp = await coordinator.client.async_api_call(
-                API_AI_FACES_GET_BY_INDEX, get_payload
-            )
-            get_data = get_resp.get("data", get_resp) if isinstance(get_resp, dict) else {}
-            records = get_data.get("SnapedFaceInfo", [])
-            all_records.extend(records)
 
         hass.bus.async_fire(
             "raysharp_nvr_faces_result",
@@ -1360,6 +1368,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Start Event Check long-polling loop for real-time events (plates, faces…)
     coordinator.async_start_event_check_loop()
     entry.async_on_unload(coordinator.async_stop_event_check_loop)
+
+    # Some firmwares record AI detections but never announce them, over either
+    # Event Check or EventPush.  Poll the object database so those still reach
+    # HA; snapshot ids are de-duplicated, so nothing doubles up where the push
+    # path does work.
+    coordinator.async_start_ai_poll_loop()
+    entry.async_on_unload(coordinator.async_stop_ai_poll_loop)
 
     # Auto-configure NVR EventPush if enabled
     if entry.options.get(CONF_EVENT_PUSH_AUTO_CONFIGURE, DEFAULT_EVENT_PUSH_AUTO_CONFIGURE):

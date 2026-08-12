@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime, timedelta
 import logging
 import time
@@ -30,6 +31,8 @@ from .const import (
     API_AI_LPD_SETUP,
     API_AI_MODEL,
     API_AI_OBJECT_STATS,
+    API_AI_OBJECTS_GET_BY_INDEX,
+    API_AI_OBJECTS_SEARCH,
     API_AI_PLATES,
     API_AI_PROCESS_ALARM,
     API_AI_PVD_SETUP,
@@ -116,6 +119,19 @@ ALARM_ENDPOINT_MAP = {
     DATA_ALARM_SOD: API_ALARM_SOD,
 }
 
+# These answer `param_error` to an empty body — like the AI setup endpoints
+# they want page_type to pick which slice of the config to return.  Verified
+# against V8.2.4.1: without it every one of them fails, with it all succeed.
+ALARM_ENDPOINTS_NEEDING_PAGE_TYPE = frozenset(
+    {
+        DATA_MOTION_ALARM,
+        DATA_ALARM_FD,
+        DATA_ALARM_LCD,
+        DATA_ALARM_PID,
+        DATA_ALARM_SOD,
+    }
+)
+
 # AI endpoints — fetched optionally, require AI-capable hardware.
 # Stored as (data_key, api_endpoint, request_data_or_None).
 # Endpoints that need time-range parameters are listed with a sentinel;
@@ -135,6 +151,27 @@ AI_SETUP_ENDPOINTS: dict[str, str] = {
     DATA_AI_LPD_SETUP: API_AI_LPD_SETUP,  # LPD may 404 on older firmware — handled gracefully
 }
 _CHANNEL_CONFIG_PARAMS: dict[str, str] = {"page_type": "ChannelConfig"}
+
+# ── AI detection polling ──────────────────────────────────────────────────────
+# Event Check carries ai_snap_picture on some firmwares and never does on
+# others — verified on V8.2.4.1, which recorded 841 person detections in a day
+# while its event stream stayed empty.  The records are always readable from
+# the object database, so poll it and replay new rows through the same parser
+# the push path uses.
+AI_POLL_INTERVAL = 10.0
+# Bursts happen (hundreds of detections in a couple of minutes); cap the
+# per-poll fetch so one busy minute can't pull megabytes of JPEGs at once.
+AI_POLL_MAX_BATCH = 20
+# A window wide enough to never need the NVR's clock, which runs in its own
+# local time and does not match Home Assistant's.
+_AI_SEARCH_WINDOW = {
+    "StartTime": "2000-01-01 00:00:00",
+    "EndTime": "2099-12-31 23:59:59",
+}
+_AI_OBJECT_TYPES = [1, 2]  # 1 = person, 2 = vehicle
+# Remember enough snapshot ids to recognise a record the push path already
+# delivered, without growing without bound.
+_SEEN_SNAPS_MAX = 512
 
 
 class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -169,6 +206,44 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Core endpoints currently failing — used to log each failure once
         # instead of on every poll.
         self._failing_endpoints: set[str] = set()
+        # Event Check bookkeeping — surfaced through diagnostics, because a
+        # silent loop and a loop the NVR never sends anything to look alike
+        # from the outside.
+        self._ec_polls = 0
+        self._ec_errors = 0
+        self._ec_dispatches = 0
+        self._ec_last_error: str | None = None
+        self._ec_last_payload: dict[str, Any] | None = None
+        self._ec_last_payload_keys: list[str] = []
+        # AI detection polling state.
+        self._ai_task: asyncio.Task | None = None
+        self._ai_cursor: int | None = None
+        self._ai_dispatched = 0
+        self._ai_last_error: str | None = None
+        # GetByIndex pages through whatever the last Search in this session
+        # selected, so searches must not interleave.  The search services in
+        # __init__ take this lock too.
+        self.ai_search_lock = asyncio.Lock()
+        # Snapshot ids already sent to the bus, by either path.
+        self._seen_snaps: deque[tuple[Any, Any]] = deque(maxlen=_SEEN_SNAPS_MAX)
+        self._seen_snaps_set: set[tuple[Any, Any]] = set()
+
+    def event_check_diagnostics(self) -> dict[str, Any]:
+        """Return a snapshot of Event Check activity for diagnostics."""
+        task = self._event_check_task
+        return {
+            "running": bool(task and not task.done()),
+            "reader_id": self._event_check_reader_id,
+            "sequence": self._event_check_sequence,
+            "polls": self._ec_polls,
+            "errors": self._ec_errors,
+            "dispatches": self._ec_dispatches,
+            "last_error": self._ec_last_error,
+            # Keys seen across all polls: shows whether the NVR ever sends
+            # alarm_list / ai_snap_picture at all on this firmware.
+            "payload_keys_seen": sorted(self._ec_last_payload_keys),
+            "last_payload": self._ec_last_payload,
+        }
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch all data from the NVR."""
@@ -244,8 +319,13 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # ── Alarm config endpoints (debug on failure) ─────────────────────────
         alarm_results = await asyncio.gather(
             *[
-                self.client.async_api_call(endpoint)
-                for endpoint in ALARM_ENDPOINT_MAP.values()
+                self.client.async_api_call(
+                    endpoint,
+                    _CHANNEL_CONFIG_PARAMS
+                    if key in ALARM_ENDPOINTS_NEEDING_PAGE_TYPE
+                    else None,
+                )
+                for key, endpoint in ALARM_ENDPOINT_MAP.items()
             ],
             return_exceptions=True,
         )
@@ -364,6 +444,15 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not isinstance(data, dict):
                     data = {}
 
+                self._ec_polls += 1
+                for key in data:
+                    if key not in self._ec_last_payload_keys:
+                        self._ec_last_payload_keys.append(key)
+                # Keep the last payload that is more than a "nothing happened"
+                # keepalive, so diagnostics can show what the NVR really sends.
+                if set(data) - {"heat_alarm", "reader_id", "sequence", "lap_number"}:
+                    self._ec_last_payload = data
+
                 # Update subscription tracking
                 if "reader_id" in data:
                     self._event_check_reader_id = data["reader_id"]
@@ -377,6 +466,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 has_snap = "ai_snap_picture" in data and data["ai_snap_picture"]
                 # talkback_alarm lives inside alarm_list entries — already covered by has_alarm
                 if has_alarm or has_snap:
+                    self._ec_dispatches += 1
+                    _LOGGER.debug("Event Check payload: %s", data)
                     self._dispatch_event_check_data(response)
 
                 consecutive_errors = 0
@@ -399,6 +490,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             except (RaySharpNVRConnectionError, Exception) as err:
                 consecutive_errors += 1
+                self._ec_errors += 1
+                self._ec_last_error = str(err)
                 _LOGGER.debug(
                     "Event Check error #%d: %s — retrying in %.0fs",
                     consecutive_errors, err, retry_delay,
@@ -411,6 +504,170 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._event_check_lap = None
                 await asyncio.sleep(min(retry_delay, 60.0))
                 retry_delay = min(retry_delay * 1.5, 60.0)
+
+    # ── AI detection polling ──────────────────────────────────────────────────
+
+    def async_start_ai_poll_loop(self) -> None:
+        """Start polling the NVR's AI object database (idempotent)."""
+        if self._ai_task and not self._ai_task.done():
+            return
+        self._ai_cursor = None
+        self._ai_task = self.hass.async_create_background_task(
+            self._async_ai_poll_loop(),
+            "raysharp_nvr_ai_poll",
+        )
+        _LOGGER.debug("Started AI detection polling task")
+
+    async def async_stop_ai_poll_loop(self) -> None:
+        """Stop the AI polling loop and await task teardown."""
+        task = self._ai_task
+        self._ai_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.shield(task)
+            except (asyncio.CancelledError, Exception):
+                pass
+        _LOGGER.debug("Stopped AI detection polling task")
+
+    async def _async_ai_poll_loop(self) -> None:
+        """Replay AI detections the NVR stored but never pushed."""
+        while True:
+            try:
+                await asyncio.sleep(AI_POLL_INTERVAL)
+                await self._async_poll_ai_detections()
+            except asyncio.CancelledError:
+                _LOGGER.debug("AI detection polling cancelled")
+                break
+            except Exception as err:  # noqa: BLE001 — loop must survive anything
+                self._ai_last_error = str(err)
+                _LOGGER.debug("AI detection poll failed: %s", err)
+
+    async def _async_poll_ai_detections(self) -> None:
+        """Fetch detections recorded since the previous poll and dispatch them.
+
+        The result set is sorted oldest-first, so its size doubles as a cursor:
+        rows added since the last poll sit at the end.
+        """
+        async with self.ai_search_lock:
+            search = await self.client.async_api_call(
+                API_AI_OBJECTS_SEARCH,
+                {
+                    "MsgId": None,
+                    **_AI_SEARCH_WINDOW,
+                    "Chn": [],
+                    "SortType": 1,
+                    "Engine": 0,
+                    "Type": _AI_OBJECT_TYPES,
+                },
+            )
+            total = self._extract_data(search).get("Count")
+            if not isinstance(total, int):
+                return
+
+            if self._ai_cursor is None:
+                # First poll — start from now rather than replaying history.
+                self._ai_cursor = total
+                _LOGGER.debug("AI detection polling armed at %d stored records", total)
+                return
+            if total < self._ai_cursor:
+                # The NVR purged old rows, so every index shifted; re-baseline.
+                _LOGGER.debug(
+                    "AI record count dropped %d → %d, re-baselining",
+                    self._ai_cursor, total,
+                )
+                self._ai_cursor = total
+                return
+            if total == self._ai_cursor:
+                return
+
+            new_rows = total - self._ai_cursor
+            start = self._ai_cursor
+            if new_rows > AI_POLL_MAX_BATCH:
+                start = total - AI_POLL_MAX_BATCH
+                _LOGGER.debug(
+                    "AI poll: %d new detections, taking the newest %d",
+                    new_rows, AI_POLL_MAX_BATCH,
+                )
+            records = await self.client.async_api_call(
+                API_AI_OBJECTS_GET_BY_INDEX,
+                {
+                    "MsgId": None,
+                    "Engine": 0,
+                    "StartIndex": start,
+                    "Count": min(new_rows, AI_POLL_MAX_BATCH),
+                    "SimpleInfo": 0,
+                    "WithObjectImage": 1,
+                    "WithBackgroud": 0,
+                },
+            )
+            self._ai_cursor = total
+
+        items = self._extract_data(records).get("SnapedObjInfo") or []
+        self._dispatch_ai_records(items)
+
+    def _dispatch_ai_records(self, items: list[dict[str, Any]]) -> None:
+        """Fire snapshot and alarm events for polled detection records.
+
+        GetByIndex returns the same SnapedObjInfo rows the push path delivers,
+        so the existing parser handles them unchanged.
+        """
+        if not items:
+            return
+        try:
+            from . import _parse_snapshot_payload  # noqa: PLC0415
+            from .const import EVENT_ALARM, EVENT_SNAPSHOT  # noqa: PLC0415
+        except ImportError:
+            _LOGGER.debug("Could not import event parsers — skipping AI dispatch")
+            return
+
+        payload = {"data": {"ai_snap_picture": {"SnapedObjInfo": items}}}
+        for snap in _parse_snapshot_payload(payload):
+            if not self._remember_snapshot(snap):
+                continue
+            self._ai_dispatched += 1
+            self.hass.bus.async_fire(EVENT_SNAPSHOT, snap)
+            self.hass.bus.async_fire(
+                EVENT_ALARM,
+                {
+                    "channel": snap.get("channel"),
+                    "channel_str": snap.get("channel_str"),
+                    "alarm_type": snap.get("alarm_type"),
+                    "snap_id": snap.get("snap_id"),
+                    "source": "ai_poll",
+                },
+            )
+            _LOGGER.debug(
+                "AI poll: %s on channel %s (snap %s)",
+                snap.get("alarm_type"), snap.get("channel"), snap.get("snap_id"),
+            )
+
+    def _remember_snapshot(self, snap: dict[str, Any]) -> bool:
+        """Return True the first time a snapshot id is seen.
+
+        Guards against the polling path re-announcing a detection the NVR
+        already pushed, on firmwares where both paths work.
+        """
+        key = (snap.get("channel"), snap.get("snap_id"))
+        if key[1] is None:
+            return True
+        if key in self._seen_snaps_set:
+            return False
+        if len(self._seen_snaps) == self._seen_snaps.maxlen:
+            self._seen_snaps_set.discard(self._seen_snaps[0])
+        self._seen_snaps.append(key)
+        self._seen_snaps_set.add(key)
+        return True
+
+    def ai_poll_diagnostics(self) -> dict[str, Any]:
+        """Return AI polling state for diagnostics."""
+        task = self._ai_task
+        return {
+            "running": bool(task and not task.done()),
+            "cursor": self._ai_cursor,
+            "dispatched": self._ai_dispatched,
+            "last_error": self._ai_last_error,
+        }
 
     def _dispatch_event_check_data(self, response: dict[str, Any]) -> None:
         """Parse Event Check response and fire HA bus events.
@@ -438,6 +695,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.bus.async_fire(EVENT_ALARM, event_data)
 
         for snap in _parse_snapshot_payload(response):
+            if not self._remember_snapshot(snap):
+                continue
             self.hass.bus.async_fire(EVENT_SNAPSHOT, snap)
             _LOGGER.debug(
                 "Event Check: fired %s snapshot for channel %s",

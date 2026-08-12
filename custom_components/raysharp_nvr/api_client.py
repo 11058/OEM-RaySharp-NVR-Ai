@@ -33,6 +33,39 @@ class RaySharpNVRConnectionError(Exception):
     """Exception for connection errors."""
 
 
+class RaySharpNVRApiError(RaySharpNVRConnectionError):
+    """The NVR answered HTTP 200 but the body says the call failed."""
+
+    def __init__(self, path: str, reason: str, error_code: str) -> None:
+        """Store the NVR's own error wording."""
+        self.reason = reason
+        self.error_code = error_code
+        super().__init__(f"API call to {path} refused: {reason} ({error_code})")
+
+
+def _raise_for_api_error(path: str, payload: Any) -> None:
+    """Raise when a 200 response carries a failure envelope.
+
+    Some endpoints report refusals in the body rather than the status line —
+    /API/AI/VhdLogCount/Get answers 200 with {"result": "failed",
+    "error_code": "no_permission"} for an account that lacks AI rights.  Taken
+    at face value that envelope gets stored as if it were data, and the
+    entities silently read empty forever.
+    """
+    if not isinstance(payload, dict):
+        return
+    # The marker sits at the top level on some endpoints, inside data on others.
+    for scope in (payload, payload.get("data")):
+        if not isinstance(scope, dict):
+            continue
+        if str(scope.get("result")).lower() in ("failed", "fail"):
+            raise RaySharpNVRApiError(
+                path,
+                str(scope.get("reason", "unspecified")),
+                str(scope.get("error_code", "unknown")),
+            )
+
+
 def _md5(text: str) -> str:
     """Return MD5 hex digest of a string."""
     return hashlib.md5(text.encode()).hexdigest()
@@ -351,7 +384,9 @@ class RaySharpNVRClient:
                     self._csrf_token = csrf
 
                 self._last_success_at = time.monotonic()
-                return await resp.json(content_type=None)
+                payload = await resp.json(content_type=None)
+                _raise_for_api_error(path, payload)
+                return payload
 
         except aiohttp.ClientError as err:
             raise RaySharpNVRConnectionError(
@@ -391,7 +426,9 @@ class RaySharpNVRClient:
                     self._csrf_token = csrf
 
                 self._last_success_at = time.monotonic()
-                return await resp.json(content_type=None)
+                payload = await resp.json(content_type=None)
+                _raise_for_api_error(path, payload)
+                return payload
 
         except aiohttp.ClientError as err:
             raise RaySharpNVRConnectionError(
@@ -465,7 +502,9 @@ class RaySharpNVRClient:
                     self._csrf_token = csrf
 
                 self._last_success_at = time.monotonic()
-                return await resp.json(content_type=None)
+                payload = await resp.json(content_type=None)
+                _raise_for_api_error(path, payload)
+                return payload
 
         except asyncio.TimeoutError:
             # Socket-level timeout — return empty so the caller retries.
