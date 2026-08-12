@@ -60,7 +60,9 @@ NVR_BINARY_SENSORS: tuple[RaySharpBinarySensorDescription, ...] = (
         translation_key="nvr_connected",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda data: True,
+        # Reflect whether the last poll actually got data out of the NVR —
+        # a hardcoded True reported "connected" through a 46-hour outage.
+        value_fn=lambda data: data.get(DATA_DEVICE_INFO) is not None,
     ),
     RaySharpBinarySensorDescription(
         key="nvr_armed",

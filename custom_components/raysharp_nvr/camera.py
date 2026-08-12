@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import logging
+import time
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -10,7 +13,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .api_client import RaySharpNVRAuthError, RaySharpNVRConnectionError
 from .const import (
+    API_SNAPSHOT,
+    CONF_HOST,
     CONF_PASSWORD,
     CONF_STREAM_TYPE,
     CONF_USERNAME,
@@ -23,12 +29,18 @@ from .const import (
 from .coordinator import RaySharpNVRCoordinator
 from .entity import RaySharpChannelEntity, channel_num_from_str
 
+_LOGGER = logging.getLogger(__name__)
 
 _STREAM_TYPE_KEY = {
     "main": "mainstream_url",
     "sub": "substream_url",
     "mobile": "mobile_stream_url",
 }
+
+# Still images are pulled from the NVR one JPEG at a time; the dashboard asks
+# for them far more often than the scene changes.
+_SNAPSHOT_CACHE_TTL = 10.0
+_SNAPSHOT_RESOLUTION = "1280 x 720"
 
 
 def _embed_creds(url: str, username: str, password: str) -> str:
@@ -52,6 +64,32 @@ def _embed_creds(url: str, username: str, password: str) -> str:
     if parsed.port:
         host = f"{host}:{parsed.port}"
     netloc = f"{auth}@{host}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _retarget_host(url: str, host: str) -> str:
+    """Point an NVR-published RTSP URL back at the address HA actually uses.
+
+    The firmware builds these URLs from its own "server address" setting, which
+    on a multi-homed install is an address Home Assistant cannot reach — seen in
+    the wild: an NVR reachable at 10.100.12.10 advertising rtsp://10.40.0.2/…,
+    which ffmpeg can only time out on.  The stream has to come from the box we
+    are already talking to, so swap the host and keep everything else.
+
+    The port is left alone on purpose: these devices serve RTSP on their web
+    port (verified — port 80 answers the RTSP handshake with 401, while 554
+    refuses the connection), so second-guessing it would break working setups.
+    """
+    if not url or not host:
+        return url
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if not parsed.hostname or parsed.hostname == host:
+        return url
+
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
     return urlunparse(parsed._replace(netloc=netloc))
 
 
@@ -151,6 +189,7 @@ async def async_setup_entry(
     stream_type = entry.options.get(CONF_STREAM_TYPE, DEFAULT_STREAM_TYPE)
     username = entry.data.get(CONF_USERNAME, "")
     password = entry.data.get(CONF_PASSWORD, "")
+    host = entry.data.get(CONF_HOST, "")
 
     channels = _get_channel_list(coordinator.data)
     rtsp_urls = _get_rtsp_urls(coordinator.data, stream_type)
@@ -166,7 +205,14 @@ async def async_setup_entry(
         # Use channel_num - 1 as the index because _get_rtsp_urls maps
         # "CH{N}" → index N-1. Using the enumerate index would break when
         # channels don't start at CH1 (e.g. first online channel is CH2).
-        rtsp_url = _embed_creds(rtsp_urls.get(channel_num - 1, ""), username, password)
+        published = rtsp_urls.get(channel_num - 1, "")
+        retargeted = _retarget_host(published, host)
+        rtsp_url = _embed_creds(retargeted, username, password)
+        if published and retargeted != published:
+            _LOGGER.debug(
+                "CH%d stream: NVR published an unreachable host, %s → %s",
+                channel_num, published, retargeted,
+            )
         entities.append(
             RaySharpCamera(
                 coordinator,
@@ -176,6 +222,7 @@ async def async_setup_entry(
                 stream_type=stream_type,
                 username=username,
                 password=password,
+                host=host,
             )
         )
 
@@ -196,6 +243,7 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         stream_type: str = DEFAULT_STREAM_TYPE,
         username: str = "",
         password: str = "",
+        host: str = "",
     ) -> None:
         """Initialize the camera."""
         RaySharpChannelEntity.__init__(self, coordinator, channel_num, channel_name)
@@ -204,6 +252,9 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         self._stream_type = stream_type
         self._username = username
         self._password = password
+        self._host = host
+        self._snapshot: bytes | None = None
+        self._snapshot_at = 0.0
         # _attr_name = None → entity is the "main feature" of the channel device;
         # entity_id becomes camera.ch17_cam03 (just the device name slug)
         self._attr_name = None
@@ -235,7 +286,50 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         also where the new selection takes effect after a reload.
         """
         rtsp_urls = _get_rtsp_urls(self.coordinator.data, self._stream_type)
-        url = rtsp_urls.get(self._channel_num - 1) or self._rtsp_url
-        if not url:
-            return None
+        published = rtsp_urls.get(self._channel_num - 1)
+        if not published:
+            return self._rtsp_url or None
+        url = _retarget_host(published, self._host)
         return _embed_creds(url, self._username, self._password)
+
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Return a still frame, pulled from the NVR's snapshot API.
+
+        Without this the dashboard preview raises NotImplementedError and the
+        card stays blank until (and unless) the RTSP stream comes up.  The NVR
+        serves one snapshot at a time and is slow about it, so frames are
+        cached briefly.
+        """
+        now = time.monotonic()
+        if self._snapshot is not None and now - self._snapshot_at < _SNAPSHOT_CACHE_TTL:
+            return self._snapshot
+
+        payload = {
+            "channel": f"CH{self._channel_num}",
+            "snapshot_resolution": _SNAPSHOT_RESOLUTION,
+            "reset_session_timeout": False,
+        }
+        try:
+            response = await self.coordinator.client.async_api_call(
+                API_SNAPSHOT, payload
+            )
+        except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
+            _LOGGER.debug("Snapshot CH%d failed: %s", self._channel_num, err)
+            return self._snapshot
+
+        snap = response.get("data", response) if isinstance(response, dict) else {}
+        # Firmware spells this `img_data`; older docs say `ima_data`.
+        img_b64 = snap.get("img_data") or snap.get("ima_data", "")
+        if not img_b64:
+            _LOGGER.debug("Snapshot CH%d returned no image data", self._channel_num)
+            return self._snapshot
+
+        try:
+            self._snapshot = base64.b64decode(img_b64)
+        except ValueError:
+            _LOGGER.debug("Snapshot CH%d base64 decode failed", self._channel_num)
+            return None
+        self._snapshot_at = now
+        return self._snapshot

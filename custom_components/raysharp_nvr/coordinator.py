@@ -166,6 +166,9 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Key: (channel, alarm_type) → monotonic timestamp of last dispatch.
         self._alarm_debounce: dict[tuple[int, str], float] = {}
         self._alarm_debounce_window: float = 10.0  # seconds
+        # Core endpoints currently failing — used to log each failure once
+        # instead of on every poll.
+        self._failing_endpoints: set[str] = set()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch all data from the NVR."""
@@ -179,11 +182,24 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except RaySharpNVRConnectionError as err:
                 raise UpdateFailed(f"Cannot connect to NVR: {err}") from err
 
-        # Heartbeat to keep session alive
+        # Heartbeat to keep session alive.  A failing heartbeat means the NVR
+        # no longer knows our session (it answers those with HTTP 400, not
+        # 401), so log in again right away — otherwise every endpoint below
+        # fails and the entities silently go blank until a manual reload.
         try:
-            await self.client.async_heartbeat()
+            alive = await self.client.async_heartbeat()
         except (RaySharpNVRAuthError, RaySharpNVRConnectionError):
-            _LOGGER.debug("Heartbeat failed, will re-login on next API call")
+            alive = False
+        if not alive:
+            _LOGGER.debug("Heartbeat failed — re-authenticating")
+            try:
+                await self.client.async_login()
+            except RaySharpNVRAuthError as err:
+                raise ConfigEntryAuthFailed(
+                    "Authentication failed, check credentials"
+                ) from err
+            except RaySharpNVRConnectionError as err:
+                raise UpdateFailed(f"Cannot connect to NVR: {err}") from err
 
         data: dict[str, Any] = {}
 
@@ -202,9 +218,14 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Authentication failed during data fetch"
                     ) from result
                 if isinstance(result, Exception):
-                    _LOGGER.warning("Failed to fetch %s: %s", key, result)
+                    # Log once per outage, not on every poll — a dead session
+                    # otherwise buries the log under thousands of lines.
+                    if key not in self._failing_endpoints:
+                        self._failing_endpoints.add(key)
+                        _LOGGER.warning("Failed to fetch %s: %s", key, result)
                     data[key] = None
                 else:
+                    self._failing_endpoints.discard(key)
                     data[key] = self._extract_data(result)
         except RaySharpNVRAuthError as err:
             raise ConfigEntryAuthFailed(
@@ -212,6 +233,13 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ) from err
         except RaySharpNVRConnectionError as err:
             raise UpdateFailed(f"Error communicating with NVR: {err}") from err
+
+        # Every core endpoint failed → the NVR is unreachable or rejecting the
+        # session.  Fail the refresh so the entities go unavailable instead of
+        # quietly reporting "unknown" forever.
+        if all(value is None for value in data.values()):
+            self.client.invalidate_session()
+            raise UpdateFailed("No response from any NVR endpoint")
 
         # ── Alarm config endpoints (debug on failure) ─────────────────────────
         alarm_results = await asyncio.gather(

@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import aiohttp
@@ -14,6 +15,14 @@ import aiohttp
 from .const import API_EVENT_CHECK, API_HEARTBEAT, API_LOGIN, API_LOGOUT
 
 _LOGGER = logging.getLogger(__name__)
+
+# The firmware answers requests carrying a dead session with HTTP 400 instead
+# of 401, so any non-200 may mean "session gone".  Statuses we probe on:
+_SESSION_SUSPECT_STATUSES = (400, 403)
+# A recent 200 from any endpoint proves the session is alive, so a 400 within
+# this window is the endpoint's own doing (unsupported on this firmware) and
+# must not trigger a re-login.
+_SESSION_ALIVE_TTL = 10.0
 
 
 class RaySharpNVRAuthError(Exception):
@@ -121,11 +130,20 @@ class RaySharpNVRClient:
         self._nc = 0
         self._digest_challenge: dict[str, str] | None = None
         self._lock = asyncio.Lock()
+        # Bumped on every successful login; lets parallel callers that hit a
+        # dead session recognise that someone else already renewed it.
+        self._session_generation = 0
+        self._last_success_at = 0.0
 
     @property
     def authenticated(self) -> bool:
         """Return whether the client is authenticated."""
         return self._authenticated
+
+    def invalidate_session(self) -> None:
+        """Drop the current session so the next call authenticates again."""
+        self._authenticated = False
+        self._last_success_at = 0.0
 
     def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session."""
@@ -220,6 +238,8 @@ class RaySharpNVRClient:
 
         data = await resp.json(content_type=None)
         self._authenticated = True
+        self._session_generation += 1
+        self._last_success_at = time.monotonic()
         _LOGGER.debug("Successfully logged in to NVR at %s", self._host)
         return data
 
@@ -237,9 +257,53 @@ class RaySharpNVRClient:
         try:
             await self.async_api_call(API_HEARTBEAT)
             return True
-        except (RaySharpNVRAuthError, RaySharpNVRConnectionError):
-            _LOGGER.warning("Heartbeat failed, session may have expired")
+        except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
+            # Session recovery inside async_api_call already tried to log in
+            # again; if we still fail, drop the session so the next call (or
+            # the coordinator) authenticates from scratch.
+            self._authenticated = False
+            _LOGGER.debug("Heartbeat failed (%s), session marked invalid", err)
             return False
+
+    async def _async_recover_session(self, generation: int) -> bool:
+        """Renew the session after a request failed with a suspect status.
+
+        The NVR answers requests carrying an expired or evicted session with
+        HTTP 400 rather than 401, so a failed call is the only hint we get.
+        Probe with a heartbeat (cheapest call that needs a live session): if
+        the probe succeeds the session is fine and the original failure was
+        request-specific, so we leave it to the caller to raise.
+
+        Returns True when the session was renewed and the caller should retry
+        the request once.
+        """
+        async with self._lock:
+            if generation != self._session_generation:
+                # Another task re-authenticated while we waited for the lock.
+                return True
+
+            if time.monotonic() - self._last_success_at < _SESSION_ALIVE_TTL:
+                # Session was verified moments ago — this endpoint is simply
+                # rejecting our request; don't log in on every such call.
+                return False
+
+            try:
+                await self._raw_api_call(API_HEARTBEAT)
+            except (RaySharpNVRAuthError, RaySharpNVRConnectionError):
+                pass  # session really is gone
+            else:
+                self._last_success_at = time.monotonic()
+                return False
+
+            self._authenticated = False
+            try:
+                await self.async_login()
+            except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
+                _LOGGER.debug("Session recovery failed: %s", err)
+                return False
+
+            _LOGGER.info("NVR session was rejected — re-authenticated")
+            return True
 
     async def async_api_call(
         self, path: str, data: dict[str, Any] | None = None
@@ -247,12 +311,14 @@ class RaySharpNVRClient:
         """Make an authenticated API call to the NVR.
 
         Uses session cookie + CSRF token from login.
-        Re-authenticates on 401 responses.
+        Re-authenticates on 401 responses, and on the 400/403 the firmware
+        returns for a session it no longer knows about.
         """
         session = self._get_session()
         url = f"{self._base_url}{path}"
         payload = {"version": "1.0", "data": data or {}}
         headers = self._build_headers()
+        generation = self._session_generation
 
         try:
             async with session.post(
@@ -267,6 +333,10 @@ class RaySharpNVRClient:
                         await self.async_login()
                     return await self._raw_api_call(path, data)
 
+                if resp.status in _SESSION_SUSPECT_STATUSES and path != API_HEARTBEAT:
+                    if await self._async_recover_session(generation):
+                        return await self._raw_api_call(path, data)
+
                 if resp.status != 200:
                     raise RaySharpNVRConnectionError(
                         f"API call to {path} failed with status {resp.status}"
@@ -280,6 +350,7 @@ class RaySharpNVRClient:
                 if csrf:
                     self._csrf_token = csrf
 
+                self._last_success_at = time.monotonic()
                 return await resp.json(content_type=None)
 
         except aiohttp.ClientError as err:
@@ -319,6 +390,7 @@ class RaySharpNVRClient:
                 if csrf:
                     self._csrf_token = csrf
 
+                self._last_success_at = time.monotonic()
                 return await resp.json(content_type=None)
 
         except aiohttp.ClientError as err:
@@ -359,6 +431,7 @@ class RaySharpNVRClient:
         url = f"{self._base_url}{API_EVENT_CHECK}"
         payload = {"version": "1.0", "data": payload_data}
         headers = self._build_headers()
+        generation = self._session_generation
 
         try:
             async with session.post(
@@ -374,6 +447,11 @@ class RaySharpNVRClient:
                     # Re-subscribe after re-login
                     return await self.async_event_check(None, None, None)
 
+                if resp.status in _SESSION_SUSPECT_STATUSES:
+                    if await self._async_recover_session(generation):
+                        # Session renewed — the old reader_id died with it.
+                        return await self.async_event_check(None, None, None)
+
                 if resp.status != 200:
                     raise RaySharpNVRConnectionError(
                         f"Event check failed with status {resp.status}"
@@ -386,6 +464,7 @@ class RaySharpNVRClient:
                 if csrf:
                     self._csrf_token = csrf
 
+                self._last_success_at = time.monotonic()
                 return await resp.json(content_type=None)
 
         except asyncio.TimeoutError:
