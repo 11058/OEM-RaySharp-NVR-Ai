@@ -162,6 +162,10 @@ AI_POLL_INTERVAL = 10.0
 # Bursts happen (hundreds of detections in a couple of minutes); cap the
 # per-poll fetch so one busy minute can't pull megabytes of JPEGs at once.
 AI_POLL_MAX_BATCH = 20
+# Replay a few stored detections on startup.  Without it the image entities sit
+# empty until something new walks past a camera, which on a quiet site can be
+# hours — indistinguishable from the integration being broken.
+AI_POLL_BACKFILL = 5
 # A window wide enough to never need the NVR's clock, which runs in its own
 # local time and does not match Home Assistant's.
 _AI_SEARCH_WINDOW = {
@@ -566,10 +570,14 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
 
             if self._ai_cursor is None:
-                # First poll — start from now rather than replaying history.
-                self._ai_cursor = total
-                _LOGGER.debug("AI detection polling armed at %d stored records", total)
-                return
+                # First poll — rewind a little so the entities start populated
+                # instead of waiting for the next person to walk past.
+                self._ai_cursor = max(0, total - AI_POLL_BACKFILL)
+                _LOGGER.debug(
+                    "AI detection polling armed at %d stored records, "
+                    "backfilling the newest %d",
+                    total, total - self._ai_cursor,
+                )
             if total < self._ai_cursor:
                 # The NVR purged old rows, so every index shifted; re-baseline.
                 _LOGGER.debug(

@@ -503,7 +503,7 @@ class RaySharpNVRClient:
 
                 self._last_success_at = time.monotonic()
                 payload = await resp.json(content_type=None)
-                _raise_for_api_error(path, payload)
+                _raise_for_api_error(API_EVENT_CHECK, payload)
                 return payload
 
         except asyncio.TimeoutError:
