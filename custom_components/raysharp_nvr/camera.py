@@ -31,11 +31,20 @@ from .entity import RaySharpChannelEntity, channel_num_from_str
 
 _LOGGER = logging.getLogger(__name__)
 
-_STREAM_TYPE_KEY = {
-    "main": "mainstream_url",
-    "sub": "substream_url",
-    "mobile": "mobile_stream_url",
+# Firmware spells the third one `mobilestream_url`; older docs say
+# `mobile_stream_url`.  Both are accepted so the "mobile" option doesn't
+# silently fall back to the main stream.
+_STREAM_TYPE_KEYS = {
+    "main": ("mainstream_url",),
+    "sub": ("substream_url",),
+    "mobile": ("mobilestream_url", "mobile_stream_url"),
 }
+_ALL_STREAM_KEYS = (
+    "mainstream_url",
+    "substream_url",
+    "mobilestream_url",
+    "mobile_stream_url",
+)
 
 # Still images are pulled from the NVR one JPEG at a time; the dashboard asks
 # for them far more often than the scene changes.
@@ -99,11 +108,8 @@ def _get_rtsp_urls(data: dict[str, Any], stream_type: str = DEFAULT_STREAM_TYPE)
     if not rtsp_data:
         return {}
 
-    primary_key = _STREAM_TYPE_KEY.get(stream_type, "mainstream_url")
-    fallback_keys = [
-        k for k in ("mainstream_url", "substream_url", "mobile_stream_url")
-        if k != primary_key
-    ]
+    primary_keys = _STREAM_TYPE_KEYS.get(stream_type, ("mainstream_url",))
+    fallback_keys = [k for k in _ALL_STREAM_KEYS if k not in primary_keys]
 
     urls: dict[int, str] = {}
 
@@ -115,12 +121,11 @@ def _get_rtsp_urls(data: dict[str, Any], stream_type: str = DEFAULT_STREAM_TYPE)
                 if not isinstance(item, dict):
                     continue
                 ch_str = str(item.get("channel", ""))
-                url = item.get(primary_key, "")
-                if not url:
-                    for fk in fallback_keys:
-                        url = item.get(fk, "")
-                        if url:
-                            break
+                url = ""
+                for key in (*primary_keys, *fallback_keys):
+                    url = item.get(key, "")
+                    if url:
+                        break
                 # Convert "CH1" → index 0, "CH2" → index 1, etc.
                 if ch_str.upper().startswith("CH"):
                     try:
@@ -178,8 +183,15 @@ async def async_setup_entry(
 
     entities: list[RaySharpCamera] = []
     for i, channel in enumerate(channels):
+        # Entities are only ever created here, so a channel skipped now has no
+        # camera until the entry is reloaded.  A configured channel that is
+        # merely offline at this moment (NVR still booting, camera power-cycled)
+        # therefore keeps its entity and goes `available` again on its own;
+        # only genuinely empty slots — no name and not connected — are skipped,
+        # which on a 32-channel NVR is most of the list.
         status = str(channel.get("connect_status", "")).lower()
-        if status != "online":
+        configured = bool(str(channel.get("channel_name", "")).strip())
+        if status != "online" and not configured:
             continue
 
         channel_num = channel_num_from_str(channel.get("channel", ""), i + 1)

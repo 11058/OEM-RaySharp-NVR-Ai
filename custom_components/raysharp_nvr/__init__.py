@@ -19,6 +19,7 @@ from homeassistant.components.webhook import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.network import get_url
 
 from .api_client import RaySharpNVRClient, RaySharpNVRConnectionError
@@ -63,6 +64,7 @@ from .const import (
     EVENT_ALARM,
     EVENT_DOORBELL,
     EVENT_SNAPSHOT,
+    MANUFACTURER,
     PLATFORMS,
     PTZ_STATE_START,
     SERVICE_CLEAR_DETECTIONS,
@@ -1343,6 +1345,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    # Register the NVR device up front.  Channel devices hang off it by
+    # registry id (see `_link_to_nvr` in entity.py), and that id only exists
+    # once the device does — so it must be created before the platforms start
+    # adding entities, not by whichever entity happens to land first.
+    device_data = coordinator.data.get(DATA_DEVICE_INFO, {}) or {}
+    mac = device_data.get("mac_addr", "unknown")
+    model = device_data.get("device_type", "NVR")
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, mac)},
+        name=f"RaySharp {model}",
+        manufacturer=MANUFACTURER,
+        model=model,
+        sw_version=device_data.get("http_api_version"),
+    )
 
     # Register webhook for NVR EventPush (idempotent: previous setup may have
     # crashed *after* the webhook was registered but *before* completing setup,
