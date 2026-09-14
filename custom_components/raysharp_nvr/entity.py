@@ -44,7 +44,12 @@ _VIA_DEVICE_ID_SUPPORTED = "via_device_id" in inspect.signature(
 ).parameters
 
 
-def _link_to_nvr(info: DeviceInfo, hass: HomeAssistant | None, mac: str) -> None:
+def _link_to_nvr(
+    info: DeviceInfo,
+    hass: HomeAssistant | None,
+    config_entry_id: str | None,
+    mac: str,
+) -> None:
     """Nest a channel device under the NVR device, whichever key core wants.
 
     `via_device_id` needs the NVR's registry id rather than its identifiers, so
@@ -52,13 +57,23 @@ def _link_to_nvr(info: DeviceInfo, hass: HomeAssistant | None, mac: str) -> None
     platforms load.  If it somehow does not, the link is simply left out: a
     flat device list is a cosmetic loss, a raised deprecation is a missing
     camera.
+
+    The lookup prefers `async_get_device_by_identifier`, which scopes the search
+    to this config entry; plain `async_get_device` is deprecated alongside
+    `via_device` (identifiers are no longer unique across entries) and is kept
+    only for cores that lack the replacement.
     """
     if not _VIA_DEVICE_ID_SUPPORTED:
         info["via_device"] = (DOMAIN, mac)
         return
     if hass is None:
         return
-    nvr_device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, mac)})
+    registry = dr.async_get(hass)
+    get_by_identifier = getattr(registry, "async_get_device_by_identifier", None)
+    if get_by_identifier is not None and config_entry_id:
+        nvr_device = get_by_identifier((DOMAIN, mac), config_entry_id)
+    else:
+        nvr_device = registry.async_get_device(identifiers={(DOMAIN, mac)})
     if nvr_device is not None:
         info["via_device_id"] = nvr_device.id
 
@@ -184,5 +199,11 @@ class RaySharpChannelEntity(RaySharpEntity):
             name=device_name,
             manufacturer=MANUFACTURER,
         )
-        _link_to_nvr(info, getattr(self, "hass", None), mac)
+        entry = getattr(self.coordinator, "config_entry", None)
+        _link_to_nvr(
+            info,
+            getattr(self, "hass", None),
+            entry.entry_id if entry is not None else None,
+            mac,
+        )
         return info
