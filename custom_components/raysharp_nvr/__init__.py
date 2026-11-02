@@ -1381,6 +1381,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Registered webhook %s for NVR EventPush", webhook_id)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    from .panel import async_setup_panel  # noqa: PLC0415
+
+    await async_setup_panel(hass)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     # Start Event Check long-polling loop for real-time events (plates, faces…)
@@ -1532,6 +1535,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_GET_PLATE_DATABASE_INFO,
             SERVICE_CONFIGURE_EVENT_PUSH,
             SERVICE_CLEAR_DETECTIONS,
+            SERVICE_DOORBELL_ANSWER,
+            SERVICE_DOORBELL_HANG_UP,
         ):
             if hass.services.has_service(DOMAIN, service_name):
                 hass.services.async_remove(DOMAIN, service_name)

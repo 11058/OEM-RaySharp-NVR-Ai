@@ -251,6 +251,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # silent loop and a loop the NVR never sends anything to look alike
         # from the outside.
         self._ec_polls = 0
+        self.record_flags: dict[int, bool] = {}
         self._ec_errors = 0
         self._ec_dispatches = 0
         self._ec_last_error: str | None = None
@@ -494,6 +495,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if set(data) - {"heat_alarm", "reader_id", "sequence", "lap_number"}:
                     self._ec_last_payload = data
 
+                self._update_record_flags(data)
+
                 # Update subscription tracking
                 if "reader_id" in data:
                     self._event_check_reader_id = data["reader_id"]
@@ -726,6 +729,21 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._extract_data(records).get("SnapedObjInfo") or []
             )
 
+    def _update_record_flags(self, data: dict[str, Any]) -> None:
+        """Keep the per-channel recording state the NVR reports in Event Check.
+
+        channel_alarm[] entries are mostly status: record_flag, connect status.
+        """
+        for entry in data.get("alarm_list") or []:
+            if not isinstance(entry, dict):
+                continue
+            for ch in entry.get("channel_alarm") or []:
+                if not isinstance(ch, dict) or "record_flag" not in ch:
+                    continue
+                digits = "".join(c for c in str(ch.get("channel", "")) if c.isdigit())
+                if digits:
+                    self.record_flags[int(digits)] = bool(ch.get("record_flag"))
+
     def _dispatch_ai_records(self, items: list[dict[str, Any]]) -> None:
         """Fire snapshot and alarm events for polled detection records.
 
@@ -747,6 +765,10 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             self._ai_dispatched += 1
             self.hass.bus.async_fire(EVENT_SNAPSHOT, snap)
+            if not _is_recent(snap.get("start_time")):
+                # History replayed at startup feeds the image history only;
+                # raising it as an alarm turned motion sensors on at boot.
+                continue
             self.hass.bus.async_fire(
                 EVENT_ALARM,
                 {
@@ -831,3 +853,10 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 doorbell_data.get("channel"),
                 doorbell_data.get("ringing"),
             )
+
+
+
+def _is_recent(start_time: Any, max_age_s: int = 300) -> bool:
+    from .events import is_recent  # noqa: PLC0415
+
+    return is_recent(start_time, max_age_s)

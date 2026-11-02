@@ -203,13 +203,17 @@ class RaySharpDoorbellCard extends HTMLElement {
 
   _updateSnapshot() {
     if (!this._hass || !this._config.camera_entity || this._inCall) return;
-    const token = this._hass.auth.data.access_token;
     const entity = this._config.camera_entity;
+    const st = this._hass.states[entity];
     const img = this.shadowRoot?.getElementById("snapshot");
     const noC = this.shadowRoot?.getElementById("no-cam");
     if (!img) return;
     // HA camera proxy endpoint
-    const url = `/api/camera_proxy/${entity}?access_token=${token}&t=${Date.now()}`;
+    // entity_picture carries the camera's own short-lived token, so the
+    // user's access token never ends up in an image URL.
+    const pic = st && st.attributes.entity_picture;
+    if (!pic) return;
+    const url = `${pic}${pic.includes("?") ? "&" : "?"}t=${Date.now()}`;
     img.onload = () => {
       img.style.display = "block";
       if (noC) noC.style.display = "none";
@@ -262,9 +266,18 @@ class RaySharpDoorbellCard extends HTMLElement {
     // Build HA WebSocket URL
     const entryId = this._config.entry_id;
     const channel = this._config.channel;
-    const token = this._hass.auth.data.access_token;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${location.host}/api/raysharp_nvr/talk/${entryId}/${channel}?access_token=${token}`;
+    let signed;
+    try {
+      // A signed path is valid for one minute and only for this URL.
+      signed = (await this._hass.callWS({
+        type: "auth/sign_path", path: `/api/raysharp_nvr/talk/${entryId}/${channel}`, expires: 60,
+      })).path;
+    } catch (e) {
+      console.error("RaySharp doorbell: could not sign talk URL", e);
+      return;
+    }
+    const wsUrl = `${proto}//${location.host}${signed}`;
 
     let ws;
     try {

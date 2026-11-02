@@ -42,6 +42,15 @@ ALL_EVENT_TYPES = [
     ALARM_TYPE_FACE,
     ALARM_TYPE_PLATE,
     ALARM_TYPE_IO,
+    "stationary_object",
+    "sound",
+    "crowd",
+    "wander",
+    "region_entrance",
+    "region_exiting",
+    "occlusion",
+    "pir",
+    "other",
 ]
 
 
@@ -138,6 +147,9 @@ class RaySharpAlarmEvent(RaySharpChannelEntity, EventEntity):
             return
 
         alarm_type = data.get("alarm_type", ALARM_TYPE_MOTION)
+        if alarm_type not in ALL_EVENT_TYPES:
+            # _trigger_event raises on a type the entity does not declare.
+            alarm_type = "other"
         event_data = {
             "channel": event_channel,
             "alarm_type": alarm_type,

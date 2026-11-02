@@ -1,0 +1,60 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
+
+  tests:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest
+      - run: pytest tests -q
+
+  imports:
+    name: import against Home Assistant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install homeassistant
+      - name: Import every module
+        run: |
+          python - <<'PY'
+          import importlib, pathlib, sys
+          sys.path.insert(0, ".")
+          failed = []
+          for f in sorted(pathlib.Path("custom_components/raysharp_nvr").glob("*.py")):
+              name = "custom_components.raysharp_nvr" + ("" if f.stem == "__init__" else "." + f.stem)
+              try:
+                  importlib.import_module(name)
+                  print("ok  ", name)
+              except Exception as err:
+                  print("FAIL", name, "->", type(err).__name__, err)
+                  failed.append(name)
+          sys.exit(1 if failed else 0)
+          PY
