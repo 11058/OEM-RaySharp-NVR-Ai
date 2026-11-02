@@ -311,6 +311,7 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
             )
         except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
             _LOGGER.debug("Snapshot CH%d failed: %s", self._channel_num, err)
+            self.coordinator.snapshot_errors[self._channel_num] = str(err)
             return self._snapshot
 
         snap = response.get("data", response) if isinstance(response, dict) else {}
@@ -318,6 +319,9 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         img_b64 = snap.get("img_data") or snap.get("ima_data", "")
         if not img_b64:
             _LOGGER.debug("Snapshot CH%d returned no image data", self._channel_num)
+            self.coordinator.snapshot_errors[self._channel_num] = str(
+                (response or {}).get("error_code") or (response or {}).get("result") or "no image"
+            )
             return self._snapshot
 
         try:
@@ -326,4 +330,5 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
             _LOGGER.debug("Snapshot CH%d base64 decode failed", self._channel_num)
             return None
         self._snapshot_at = now
+        self.coordinator.snapshot_errors.pop(self._channel_num, None)
         return self._snapshot

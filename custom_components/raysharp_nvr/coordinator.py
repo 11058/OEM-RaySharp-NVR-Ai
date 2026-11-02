@@ -252,6 +252,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # from the outside.
         self._ec_polls = 0
         self.record_flags: dict[int, bool] = {}
+        self.snapshot_errors: dict[int, str] = {}
         self._ec_errors = 0
         self._ec_dispatches = 0
         self._ec_last_error: str | None = None
@@ -742,7 +743,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 digits = "".join(c for c in str(ch.get("channel", "")) if c.isdigit())
                 if digits:
-                    self.record_flags[int(digits)] = bool(ch.get("record_flag"))
+                    self.record_flags[int(digits)] = _recording(ch.get("record_flag"))
 
     def _dispatch_ai_records(self, items: list[dict[str, Any]]) -> None:
         """Fire snapshot and alarm events for polled detection records.
@@ -860,3 +861,16 @@ def _is_recent(start_time: Any, max_age_s: int = 300) -> bool:
     from .events import is_recent  # noqa: PLC0415
 
     return is_recent(start_time, max_age_s)
+
+
+def _recording(flag: Any) -> bool:
+    """record_flag is a bool on some firmware, {"r": "SR"} on others.
+
+    In the dict form the value lists the active record types (letters such as
+    S/R/M/A), empty when the channel is not recording.
+    """
+    if isinstance(flag, dict):
+        return any(str(v).strip() for v in flag.values())
+    if isinstance(flag, str):
+        return flag.strip().lower() not in ("", "0", "false", "off", "no")
+    return bool(flag)

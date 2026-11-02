@@ -96,6 +96,21 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
             }
         )
 
+    warnings = []
+    snap_err = getattr(coord, "snapshot_errors", {})
+    if snap_err:
+        chans = ", ".join(f"CH{n}" for n in sorted(snap_err))
+        first = next(iter(snap_err.values()))
+        warnings.append(f"NVR не отдаёт кадры ({chans}): {first}")
+    ai_err = str(getattr(coord, "_ai_last_error", "") or "")
+    if "permission" in ai_err.lower():
+        warnings.append("NVR отказал в поиске AI-событий: нет прав")
+    if warnings and any("permission" in w.lower() or "прав" in w for w in warnings + list(snap_err.values())):
+        warnings.append(
+            "Похоже, у пользователя NVR, указанного в HA, нет прав на просмотр, "
+            "поиск или настройки — выдайте их в NVR (Пользователи → права) или укажите admin."
+        )
+
     return {
         "entry_id": entry.entry_id,
         "title": entry.title,
@@ -117,6 +132,7 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
         },
         "event_timeout": entry.options.get(CONF_EVENT_TIMEOUT, DEFAULT_EVENT_TIMEOUT),
         "channels": channels,
+        "warnings": warnings,
     }
 
 

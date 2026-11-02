@@ -44,6 +44,7 @@ class RaySharpNvrPanel extends HTMLElement {
     this._tick = 0;
     this._size = "m";
     this._motionFirst = true;
+    this._showEmpty = false;
     this._filter = "";
     this._open = null; // {entry, num}
     this._confirm = null;
@@ -165,6 +166,7 @@ class RaySharpNvrPanel extends HTMLElement {
         <span class="grow"></span>
         <span class="sub">сегодня: 🧍 ${ai.persons ?? "—"} · 🚗 ${ai.vehicles ?? "—"} · 🔢 ${ai.plates ?? "—"} · 🙂 ${ai.faces ?? "—"}</span>
       </div>
+      ${(n.warnings || []).map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
       ${disks ? `<div class="disks">${disks}</div>` : ""}
       ${this._admin ? `<div class="hrow">${btn("reboot", "Перезагрузить NVR", "Перезагрузить регистратор (запись прервётся)")}</div>` : ""}
     </section>`;
@@ -183,7 +185,10 @@ class RaySharpNvrPanel extends HTMLElement {
   }
 
   _nvrView(n) {
-    let chans = [...n.channels];
+    // Channels with no camera at all (empty NVR inputs) only on request.
+    const used = n.channels.filter((c) => c.camera || c.online);
+    const hidden = n.channels.length - used.length;
+    let chans = this._showEmpty ? [...n.channels] : used;
     if (this._motionFirst) {
       chans.sort((a, b) => (this._active(n, b).length > 0) - (this._active(n, a).length > 0) || a.num - b.num);
     }
@@ -201,6 +206,7 @@ class RaySharpNvrPanel extends HTMLElement {
       <div class="tools">
         <span class="sub">Размер:</span>${["s", "m", "l"].map((s) => `<button class="tab ${this._size === s ? "on" : ""}" data-do="size" data-s="${s}">${{ s: "мелко", m: "средне", l: "крупно" }[s]}</button>`).join("")}
         <label class="sub"><input type="checkbox" id="mf" ${this._motionFirst ? "checked" : ""}> с движением — вверх</label>
+        ${hidden ? `<label class="sub"><input type="checkbox" id="se" ${this._showEmpty ? "checked" : ""}> пустые каналы (${hidden})</label>` : ""}
       </div>
       <div class="layout">
         <div class="grid ${this._size}">${chans.map((c) => this._tile(n, c)).join("")}</div>
@@ -297,6 +303,8 @@ class RaySharpNvrPanel extends HTMLElement {
     }));
     const mf = root.querySelector("#mf");
     if (mf) mf.addEventListener("change", () => { this._motionFirst = mf.checked; this._render(); });
+    const se = root.querySelector("#se");
+    if (se) se.addEventListener("change", () => { this._showEmpty = se.checked; this._render(); });
   }
 }
 
@@ -310,6 +318,8 @@ const STYLE = `
   h1 { font-size: 20px; font-weight: 500; margin: 0; } h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
   h3 { font-size: 13px; color: var(--secondary-text-color); margin: 12px 0 6px; font-weight: 500; }
   .sub { font-size: 12px; color: var(--secondary-text-color); } .muted { color: var(--secondary-text-color); padding: 8px; }
+  .warn { background: color-mix(in srgb, var(--warning-color, #ffa600) 18%, transparent); border-left: 3px solid var(--warning-color, #ffa600);
+    padding: 6px 10px; border-radius: 6px; font-size: 13px; }
   .bad { color: var(--error-color, #c62828); }
   .error { background: var(--error-color); color: #fff; padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; }
   .card { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 12px 14px; box-sizing: border-box; }

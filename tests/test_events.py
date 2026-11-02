@@ -61,3 +61,18 @@ def test_is_recent():
     assert events.is_recent(now) and events.is_recent(now * 1000)
     assert not events.is_recent(now - 3600)
     assert events.is_recent("garbage") and events.is_recent(None)
+
+
+def test_record_flag_forms():
+    import sys
+    import types
+
+    # coordinator imports Home Assistant; only the pure helper is needed.
+    src = (load_module.__globals__["COMPONENT"] / "coordinator.py").read_text()
+    body = src[src.index("def _recording("):]
+    ns: dict = {"Any": object}
+    exec(body, ns)
+    rec = ns["_recording"]
+    assert rec({"r": "SR"}) and not rec({"r": ""}) and rec(True) and not rec(False)
+    assert not rec("") and rec("1")
+    del sys, types
