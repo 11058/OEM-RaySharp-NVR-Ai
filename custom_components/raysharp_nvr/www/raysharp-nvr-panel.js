@@ -92,6 +92,7 @@ class RaySharpNvrPanel extends HTMLElement {
     this._pics = new Map(); // event id -> data URL
     this._tiles = new Map(); // "entry:num" -> {el, img, media, ovl, cap, live}
     this._tick = 0;
+    this._gen = 0;
     this._size = store.get("size", "m");
     this._motionFirst = store.get("motion_first", "1") === "1";
     this._liveGrid = store.get("live_grid", "1") === "1";
@@ -104,17 +105,26 @@ class RaySharpNvrPanel extends HTMLElement {
     this._error = "";
   }
 
+  // HA keeps the panel element and re-attaches it when the user comes back
+  // from another page: everything started in _start must be undone on
+  // detach and started again on attach, or the page works only until the
+  // first navigation.
   set hass(h) {
-    const first = !this._hass;
     this._hass = h;
-    if (first) this._start();
+    if (!this._started && this.isConnected) this._start();
     else if (this._stream) this._stream.hass = h;
+  }
+  connectedCallback() {
+    if (this._hass && !this._started) this._start();
   }
   set narrow(v) { this._narrow = v; }
   set panel(v) {}
   get _admin() { return !!(this._hass && this._hass.user && this._hass.user.is_admin); }
 
   async _start() {
+    this._started = true;
+    const gen = ++this._gen;
+    this._tiles.clear(); this._stream = null;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Видео</div></div>
       <div id="body" class="body"><div class="muted">Загрузка…</div></div><div id="modal"></div>`;
@@ -124,8 +134,9 @@ class RaySharpNvrPanel extends HTMLElement {
     body.addEventListener("click", (ev) => this._onClick(ev));
     body.addEventListener("change", (ev) => this._onChange(ev));
     await this._load();
+    if (gen !== this._gen) return;
     try {
-      this._unsub = await this._hass.connection.subscribeMessage((msg) => {
+      const unsub = await this._hass.connection.subscribeMessage((msg) => {
         if (msg.event) {
           const i = this._events.findIndex((e) => e.id === msg.event.id);
           if (i >= 0) this._events[i] = msg.event; else this._events.unshift(msg.event);
@@ -137,20 +148,26 @@ class RaySharpNvrPanel extends HTMLElement {
           clearTimeout(this._deb); this._deb = setTimeout(() => this._load(), 800);
         }
       }, { type: "raysharp_nvr/subscribe" });
+      if (gen !== this._gen) unsub(); else this._unsub = unsub;
     } catch (e) { /* polling only */ }
+    if (gen !== this._gen) return;
     // Snapshot tiles (when live video is off or fails) refresh slowly: the
     // NVR serves one snapshot at a time.
     this._timer = setInterval(() => { this._tick++; this._render(); }, 15000);
   }
 
   disconnectedCallback() {
-    if (this._unsub) this._unsub();
-    clearInterval(this._timer);
-    this._hass = undefined;
+    this._gen++; this._started = false;
+    if (this._unsub) { try { this._unsub(); } catch (e) { /* socket gone */ } }
+    this._unsub = null;
+    clearInterval(this._timer); clearTimeout(this._deb);
+    for (const t of this._tiles.values()) clearTimeout(t.watch);
+    this._tiles.clear(); this._stream = null;
+    if (this.shadowRoot) this.shadowRoot.innerHTML = "";
   }
 
   async _load() {
-    if (!this._hass) return;
+    if (!this._hass || !this._started) return;
     try {
       const res = await this._hass.callWS({
         type: "raysharp_nvr/overview", since: Date.now() / 1000 - this._period, limit: 1000,
@@ -193,6 +210,7 @@ class RaySharpNvrPanel extends HTMLElement {
   // The page is built once per NVR and patched afterwards: tiles carry live
   // video that must not be torn down on every update.
   _render(soft = false) {
+    if (!this._started || !this._hass) return;
     const body = this.shadowRoot.getElementById("body");
     if (!body) return;
     if (!this._nvrs.length) {
@@ -315,14 +333,20 @@ class RaySharpNvrPanel extends HTMLElement {
     if (this._liveGrid && !t.liveFailed) {
       if (t.mode === "live" || t.mode === "starting") return;
       t.mode = "starting";
+      const gen = this._gen;
       this._hass.callWS({ type: "raysharp_nvr/stream", camera: ch.camera, profile: "lowest" })
         .then(async (res) => {
-          if (t.mode !== "starting") return;
+          if (t.mode !== "starting" || gen !== this._gen) return;
           const p = await makePlayer(this._hass, res.url);
+          if (t.mode !== "starting" || gen !== this._gen) return;
           p.classList.add("tilevid");
           t.media.innerHTML = ""; t.media.appendChild(p); t.mode = "live";
+          this._watchTile(t, ch, p, gen);
         })
-        .catch(() => { t.liveFailed = true; t.mode = ""; this._tileMedia(t, ch, lost); });
+        .catch(() => {
+          if (gen !== this._gen) return;
+          t.liveFailed = true; t.mode = ""; this._tileMedia(t, ch, lost);
+        });
       if (!t.media.firstChild && ch.picture) t.media.innerHTML = `<img src="${esc(ch.picture)}" alt="">`;
       return;
     }
@@ -330,6 +354,23 @@ class RaySharpNvrPanel extends HTMLElement {
     if (t.mode === "pic" && t.pic === pic) return;
     t.media.innerHTML = pic ? `<img loading="lazy" src="${esc(pic)}" alt="">` : '<div class="noimg">нет кадра</div>';
     t.mode = "pic"; t.pic = pic;
+  }
+
+  // A stream that never starts leaves ha-hls-player showing its error
+  // banner forever. Ask once more (the server drops a dead stream and moves
+  // to the next profile), then settle for refreshed snapshots.
+  _watchTile(t, ch, p, gen) {
+    clearTimeout(t.watch);
+    t.watch = setTimeout(() => {
+      if (gen !== this._gen || t.mode !== "live" || !p.isConnected) return;
+      const sr = p.shadowRoot;
+      const failed = sr && sr.querySelector("ha-alert");
+      if (!failed) return;
+      t.mode = "";
+      if (t.retried) t.liveFailed = true; else t.retried = true;
+      t.media.innerHTML = "";
+      this._tileMedia(t, ch, false);
+    }, 25000);
   }
 
   _feedView(n) {
@@ -382,7 +423,7 @@ class RaySharpNvrPanel extends HTMLElement {
       case "se": this._showEmpty = el.checked; break;
       case "live":
         this._liveGrid = el.checked; store.set("live_grid", el.checked ? 1 : 0);
-        for (const t of this._tiles.values()) { t.mode = ""; t.liveFailed = false; t.media.innerHTML = ""; }
+        for (const t of this._tiles.values()) { clearTimeout(t.watch); t.mode = ""; t.liveFailed = false; t.retried = false; t.media.innerHTML = ""; }
         break;
       case "period":
         this._period = Number(el.value); this._feedLimit = 100;
@@ -446,8 +487,10 @@ class RaySharpNvrPanel extends HTMLElement {
     box.innerHTML = '<div class="noimg">Подключаюсь…</div>';
     try {
       const res = await this._hass.callWS({ type: "raysharp_nvr/stream", camera: ch.camera, profile });
-      if (this.shadowRoot.getElementById("modal").dataset.key !== key) return;
+      const host = this.shadowRoot.getElementById("modal");
+      if (!box.isConnected || !host || host.dataset.key !== key) return;
       const p = await makePlayer(this._hass, res.url, { controls: true });
+      if (!box.isConnected) return;
       box.innerHTML = ""; box.appendChild(p);
     } catch (e) {
       box.innerHTML = `<div class="noimg">${esc(e.message || e)}</div>`;
@@ -463,8 +506,9 @@ class RaySharpNvrPanel extends HTMLElement {
       box.innerHTML = `<div class="noimg">${esc(e.message || e)}</div>`;
       return;
     }
-    if (!this._open || this._open.clip !== ts) return; // closed meanwhile
+    if (!box.isConnected || !this._open || this._open.clip !== ts) return; // closed meanwhile
     const p = await makePlayer(this._hass, res.url, { controls: true });
+    if (!box.isConnected) return;
     box.innerHTML = ""; box.appendChild(p);
     const note = document.createElement("div");
     note.className = "sub cliphint";

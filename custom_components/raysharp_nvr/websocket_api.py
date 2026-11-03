@@ -323,22 +323,72 @@ def _has_video(url: str) -> bool:
     return _probe(url) == ""
 
 
+def _with_port(url: str, port: int) -> str:
+    from urllib.parse import urlparse, urlunparse  # noqa: PLC0415
+
+    u = urlparse(url)
+    if not u.hostname:
+        return url
+    auth = u.netloc.rsplit("@", 1)[0] + "@" if "@" in u.netloc else ""
+    return urlunparse(u._replace(netloc=f"{auth}{u.hostname}:{port}"))
+
+
+def _playback_bases(live: str) -> list[str]:
+    """The live URL, then the same on 554 and 80: some firmware publishes
+    live video on its web port but serves recordings only on 554 (and the
+    other way round), answering the wrong port with an empty session."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    out = [live]
+    try:
+        own = urlparse(live).port or 554
+    except ValueError:
+        return out
+    for port in (554, 80):
+        try:
+            alt = _with_port(live, port) if own != port else live
+        except ValueError:
+            continue
+        if alt not in out:
+            out.append(alt)
+    return out
+
+
+def _port_dead(why: str) -> bool:
+    """Errors that no other time format can fix on this port."""
+    w = why.lower()
+    return any(s in w for s in ("refused", "timed out", "timeout", "unreachable", "no route"))
+
+
 async def _playback_source(
     hass: HomeAssistant, camera: str, live: str, ts: float, end: float | None = None
 ) -> str | None:
-    """Find (once per camera) which playback form the NVR answers with video."""
+    """Find (once per camera) which port and time form the NVR answers with video."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+
     known: dict = hass.data.setdefault(_VARIANT, {})
     start, end = ts - CLIP_BEFORE_S, end or ts + CLIP_AFTER_S
-    order = [known[camera]] if camera in known else list(PLAYBACK_VARIANTS)
+    bases = _playback_bases(live)
+    if camera in known:
+        port, variant = known[camera]
+        order = [(b, variant) for b in bases if (urlparse(b).port or 554) == port][:1]
+    else:
+        order = [(b, v) for b in bases for v in PLAYBACK_VARIANTS]
     reasons = hass.data.setdefault(f"{DOMAIN}_clip_reasons", {})
     reasons[camera] = []
-    for variant in order:
-        url = playback_url(live, start, end, variant)
+    skip: set[str] = set()
+    for base, variant in order:
+        if base in skip:
+            continue
+        url = playback_url(base, start, end, variant)
         why = await hass.async_add_executor_job(_probe, url) if url else "нет адреса"
+        port = urlparse(base).port or 554
         if not why:
-            known[camera] = variant
+            known[camera] = (port, variant)
             return url
-        reasons[camera].append(f"{variant}: {why}")
+        reasons[camera].append(f"{port}/{variant}: {why}")
+        if _port_dead(why):
+            skip.add(base)
     if camera in known:  # remembered form stopped working: search again
         known.pop(camera)
         return await _playback_source(hass, camera, live, ts, end)
@@ -452,6 +502,10 @@ async def ws_stream(hass: HomeAssistant, connection, msg: dict) -> None:
         for cand in ("mobile", "sub", "main"):
             if cand not in urls or dead.get((msg["camera"], cand)):
                 continue
+            running = hass.data.get(_LIVE, {}).get((msg["camera"], cand))
+            if running is not None and not getattr(running, "available", True) and cand != "main":
+                dead[(msg["camera"], cand)] = True
+                continue
             if cand == "main" or await hass.async_add_executor_job(_has_video, urls[cand]):
                 profile = cand
                 break
@@ -466,6 +520,12 @@ async def ws_stream(hass: HomeAssistant, connection, msg: dict) -> None:
     live: dict = hass.data.setdefault(_LIVE, {})
     key = (msg["camera"], profile)
     stream = live.get(key)
+    if stream is not None and not getattr(stream, "available", True):
+        # The worker gave up (NVR refused, codec, session limit): the old HLS
+        # URL would never produce a segment. Start over.
+        live.pop(key, None)
+        await stream.stop()
+        stream = None
     if stream is None or "hls" not in stream.outputs():
         try:
             stream = create_stream(
