@@ -286,6 +286,26 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         url = _retarget_host(published, self._host)
         return _embed_creds(url, self._username, self._password)
 
+    def profile_urls(self) -> dict[str, str]:
+        """RTSP source per stream profile the NVR publishes for this channel.
+
+        Exact keys only (no fallback), so the panel can offer what exists.
+        """
+        rtsp_data = (self.coordinator.data or {}).get(DATA_RTSP_URLS)
+        items = rtsp_data.get("channel_info") if isinstance(rtsp_data, dict) else None
+        out: dict[str, str] = {}
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if channel_num_from_str(str(item.get("channel", "")), 0) != self._channel_num:
+                continue
+            for profile, keys in _STREAM_TYPE_KEYS.items():
+                url = next((item.get(k) for k in keys if item.get(k)), "")
+                if url:
+                    url = _retarget_host(url, self._host)
+                    out[profile] = _embed_creds(url, self._username, self._password)
+        return out
+
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:

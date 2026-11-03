@@ -44,6 +44,41 @@ function ago(ts) {
   return hhmm(ts);
 }
 
+const PROFILES = [["auto", "Авто"], ["main", "Основной"], ["sub", "Доп."], ["mobile", "Моб."]];
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(`raysharp_nvr_${k}`); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(`raysharp_nvr_${k}`, String(v)); } catch (e) { /* private mode */ } },
+};
+
+// ha-hls-player ships with HA's camera UI, which loads lazily; pull it in once.
+let playerReady;
+function ensurePlayer() {
+  if (customElements.get("ha-hls-player")) return Promise.resolve(true);
+  if (!playerReady) {
+    playerReady = (async () => {
+      try {
+        const helpers = window.loadCardHelpers ? await window.loadCardHelpers() : null;
+        if (helpers) helpers.createCardElement({ type: "picture-entity", entity: "camera.x", camera_view: "live" });
+      } catch (e) { /* fall back to <video> */ }
+      await Promise.race([customElements.whenDefined("ha-hls-player"), new Promise((r) => setTimeout(r, 6000))]);
+      return !!customElements.get("ha-hls-player");
+    })();
+  }
+  return playerReady;
+}
+
+async function makePlayer(hass, url, { controls = false } = {}) {
+  if (await ensurePlayer()) {
+    const p = document.createElement("ha-hls-player");
+    p.hass = hass; p.url = url; p.controls = controls; p.muted = true;
+    p.autoPlay = true; p.autoplay = true; p.playsInline = true; p.allowExoPlayer = true;
+    return p;
+  }
+  const v = document.createElement("video");
+  v.src = url; v.controls = controls; v.muted = true; v.autoplay = true; v.playsInline = true;
+  return v;
+}
+
 class RaySharpNvrPanel extends HTMLElement {
   constructor() {
     super();
@@ -51,13 +86,16 @@ class RaySharpNvrPanel extends HTMLElement {
     this._nvrs = [];
     this._events = [];
     this._pics = new Map(); // event id -> data URL
+    this._tiles = new Map(); // "entry:num" -> {el, img, media, ovl, cap, live}
     this._tick = 0;
-    this._size = "m";
-    this._motionFirst = true;
+    this._size = store.get("size", "m");
+    this._motionFirst = store.get("motion_first", "1") === "1";
+    this._liveGrid = store.get("live_grid", "1") === "1";
+    this._profile = store.get("profile", window.innerWidth < 700 ? "sub" : "auto");
     this._showEmpty = false;
     this._period = loadPeriod();
     this._filter = "";
-    this._open = null; // {entry, num}
+    this._open = null; // {entry, num, clip}
     this._confirm = null;
     this._error = "";
   }
@@ -78,6 +116,9 @@ class RaySharpNvrPanel extends HTMLElement {
       <div id="body" class="body"><div class="muted">Загрузка…</div></div><div id="modal"></div>`;
     const m = this.shadowRoot.querySelector("ha-menu-button");
     if (m) { m.hass = this._hass; m.narrow = this._narrow; }
+    const body = this.shadowRoot.getElementById("body");
+    body.addEventListener("click", (ev) => this._onClick(ev));
+    body.addEventListener("change", (ev) => this._onChange(ev));
     await this._load();
     try {
       this._unsub = await this._hass.connection.subscribeMessage((msg) => {
@@ -93,7 +134,8 @@ class RaySharpNvrPanel extends HTMLElement {
         }
       }, { type: "raysharp_nvr/subscribe" });
     } catch (e) { /* polling only */ }
-    // Thumbnails: the NVR serves one snapshot at a time, so refresh slowly.
+    // Snapshot tiles (when live video is off or fails) refresh slowly: the
+    // NVR serves one snapshot at a time.
     this._timer = setInterval(() => { this._tick++; this._render(); }, 15000);
   }
 
@@ -136,24 +178,49 @@ class RaySharpNvrPanel extends HTMLElement {
     const now = Date.now() / 1000;
     const types = new Set(ch.active.map((s) => SUFFIX[s] || "motion"));
     for (const ev of this._events) {
-      if (now - (ev.last || ev.ts) > nvr.event_timeout) continue;
+      if (ev.history || now - (ev.last || ev.ts) > nvr.event_timeout) continue;
       if (ev.channel === ch.num) types.add(ev.type);
     }
     return PRIORITY.filter((t) => types.has(t));
   }
 
+  // ── page ──────────────────────────────────────────────────────────────
+  // The page is built once per NVR and patched afterwards: tiles carry live
+  // video that must not be torn down on every update.
   _render(soft = false) {
     const body = this.shadowRoot.getElementById("body");
     if (!body) return;
-    if (soft && this._open) { this._renderModal(); }
-    const scrollY = window.scrollY;
-    body.innerHTML = (this._error ? `<div class="error">${esc(this._error)}</div>` : "")
-      + (this._nvrs.length ? this._nvrs.map((n) => this._nvrView(n)).join("")
-        : `<div class="muted">Нет настроенных регистраторов.</div>`);
-    this._bind(body);
-    window.scrollTo(0, scrollY);
-    if (!soft) this._renderModal();
-    // Load the first thumbnails of the feed.
+    if (!this._nvrs.length) {
+      body.innerHTML = (this._error ? `<div class="error">${esc(this._error)}</div>` : "")
+        + '<div class="muted">Нет настроенных регистраторов.</div>';
+      this._tiles.clear();
+      return;
+    }
+    if (body.querySelector(".muted") && !body.querySelector(".nvr")) body.innerHTML = "";
+    let err = body.querySelector(":scope > .error");
+    if (this._error) {
+      if (!err) { err = document.createElement("div"); err.className = "error"; body.prepend(err); }
+      err.textContent = this._error;
+    } else if (err) err.remove();
+
+    const seen = new Set();
+    for (const n of this._nvrs) {
+      seen.add(n.entry_id);
+      let sec = body.querySelector(`.nvr[data-entry="${CSS.escape(n.entry_id)}"]`);
+      if (!sec) {
+        sec = document.createElement("div");
+        sec.className = "nvr"; sec.dataset.entry = n.entry_id;
+        sec.innerHTML = `<div class="h"></div><div class="tools"></div>
+          <div class="layout"><div class="grid"></div><aside class="feed card"></aside></div>`;
+        body.appendChild(sec);
+      }
+      sec.querySelector(".h").innerHTML = this._header(n);
+      sec.querySelector(".tools").innerHTML = this._toolsView(n);
+      this._grid(n, sec.querySelector(".grid"));
+      if (!soft || true) sec.querySelector(".feed").innerHTML = this._feedView(n);
+    }
+    body.querySelectorAll(".nvr").forEach((s) => { if (!seen.has(s.dataset.entry)) s.remove(); });
+    if (!soft) this._renderModal(); else if (this._open) this._renderModal();
     this._events.filter((e) => e.picture).slice(0, 12).forEach((e) => this._picture(e.id));
   }
 
@@ -187,29 +254,79 @@ class RaySharpNvrPanel extends HTMLElement {
     </section>`;
   }
 
-  _tile(n, ch) {
-    const act = this._active(n, ch);
-    const pic = ch.picture ? `${ch.picture}${ch.picture.includes("?") ? "&" : "?"}t=${this._tick}` : "";
-    const lost = !ch.online || ch.videoloss;
-    return `<button class="tile ${act.length ? "alert" : ""} ${lost ? "lost" : ""}" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${ch.num}">
-      <div class="img">${pic && !lost ? `<img loading="lazy" src="${esc(pic)}" alt="">` : `<div class="noimg">${lost ? "нет сигнала" : "нет кадра"}</div>`}
-        ${act.length ? `<span class="badge">${esc(TYPE[act[0]] || act[0])}${act.length > 1 ? ` +${act.length - 1}` : ""}</span>` : ""}
-        ${ch.recording ? '<span class="rec">● REC</span>' : ""}</div>
-      <div class="cap"><b>${esc(ch.name)}</b><span class="sub">CH${ch.num}</span></div>
-    </button>`;
+  _toolsView(n) {
+    const hidden = n.channels.filter((c) => !(c.camera || c.online)).length;
+    return `<span class="sub">Размер:</span>${["s", "m", "l"].map((s) => `<button class="tab ${this._size === s ? "on" : ""}" data-do="size" data-s="${s}">${{ s: "мелко", m: "средне", l: "крупно" }[s]}</button>`).join("")}
+      <label class="sub"><input type="checkbox" data-opt="live" ${this._liveGrid ? "checked" : ""}> живое видео (лёгкий поток)</label>
+      <label class="sub"><input type="checkbox" data-opt="mf" ${this._motionFirst ? "checked" : ""}> с движением — вверх</label>
+      ${hidden ? `<label class="sub"><input type="checkbox" data-opt="se" ${this._showEmpty ? "checked" : ""}> пустые каналы (${hidden})</label>` : ""}`;
   }
 
-  _nvrView(n) {
-    // Channels with no camera at all (empty NVR inputs) only on request.
-    const used = n.channels.filter((c) => c.camera || c.online);
-    const hidden = n.channels.length - used.length;
-    let chans = this._showEmpty ? [...n.channels] : used;
+  _grid(n, grid) {
+    grid.className = `grid ${this._size}`;
+    const chans = n.channels.filter((c) => this._showEmpty || c.camera || c.online);
+    const order = [...chans];
     if (this._motionFirst) {
-      chans.sort((a, b) => (this._active(n, b).length > 0) - (this._active(n, a).length > 0) || a.num - b.num);
+      order.sort((a, b) => (this._active(n, b).length > 0) - (this._active(n, a).length > 0) || a.num - b.num);
     }
+    const keep = new Set();
+    order.forEach((ch, idx) => {
+      const key = `${n.entry_id}:${ch.num}`;
+      keep.add(key);
+      let t = this._tiles.get(key);
+      if (!t || !t.el.isConnected || t.el.parentNode !== grid) {
+        const el = document.createElement("div");
+        el.className = "tile"; el.dataset.do = "open"; el.dataset.entry = n.entry_id; el.dataset.num = ch.num;
+        el.innerHTML = `<div class="img"><div class="media"></div><div class="ovl"></div></div><div class="cap"></div>`;
+        grid.appendChild(el);
+        t = { el, media: el.querySelector(".media"), ovl: el.querySelector(".ovl"), cap: el.querySelector(".cap"), mode: "" };
+        this._tiles.set(key, t);
+      }
+      // CSS order instead of moving nodes: moving would restart the video.
+      t.el.style.order = String(idx);
+      const act = this._active(n, ch);
+      const lost = !ch.online || ch.videoloss;
+      t.el.className = `tile ${act.length ? "alert" : ""} ${lost ? "lost" : ""}`;
+      t.ovl.innerHTML = `${act.length ? `<span class="badge">${esc(TYPE[act[0]] || act[0])}${act.length > 1 ? ` +${act.length - 1}` : ""}</span>` : ""}
+        ${ch.recording ? '<span class="rec">● REC</span>' : ""}`;
+      t.cap.innerHTML = `<b>${esc(ch.name)}</b><span class="sub">CH${ch.num}</span>`;
+      this._tileMedia(t, ch, lost);
+    });
+    for (const [key, t] of this._tiles) {
+      if (key.startsWith(`${n.entry_id}:`) && !keep.has(key)) { t.el.remove(); this._tiles.delete(key); }
+    }
+  }
+
+  _tileMedia(t, ch, lost) {
+    if (lost || !ch.camera) {
+      if (t.mode !== "lost") { t.media.innerHTML = `<div class="noimg">${lost ? "нет сигнала" : "нет кадра"}</div>`; t.mode = "lost"; }
+      return;
+    }
+    if (this._liveGrid && !t.liveFailed) {
+      if (t.mode === "live" || t.mode === "starting") return;
+      t.mode = "starting";
+      this._hass.callWS({ type: "raysharp_nvr/stream", camera: ch.camera, profile: "lowest" })
+        .then(async (res) => {
+          if (t.mode !== "starting") return;
+          const p = await makePlayer(this._hass, res.url);
+          p.classList.add("tilevid");
+          t.media.innerHTML = ""; t.media.appendChild(p); t.mode = "live";
+        })
+        .catch(() => { t.liveFailed = true; t.mode = ""; this._tileMedia(t, ch, lost); });
+      if (!t.media.firstChild && ch.picture) t.media.innerHTML = `<img src="${esc(ch.picture)}" alt="">`;
+      return;
+    }
+    const pic = ch.picture ? `${ch.picture}${ch.picture.includes("?") ? "&" : "?"}t=${this._tick}` : "";
+    if (t.mode === "pic" && t.pic === pic) return;
+    t.media.innerHTML = pic ? `<img loading="lazy" src="${esc(pic)}" alt="">` : '<div class="noimg">нет кадра</div>';
+    t.mode = "pic"; t.pic = pic;
+  }
+
+  _feedView(n) {
     const nameOf = Object.fromEntries(n.channels.map((c) => [c.num, c.name]));
     const types = [...new Set(this._events.map((e) => e.type))];
-    const feed = this._events.filter((e) => !this._filter || e.type === this._filter).slice(0, this._feedLimit || 100).map((e) => {
+    const list = this._events.filter((e) => !this._filter || e.type === this._filter);
+    const feed = list.slice(0, this._feedLimit || 100).map((e) => {
       const pic = e.picture ? this._pics.get(e.id) : null;
       if (e.picture && !this._pics.has(e.id)) this._picture(e.id);
       return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${e.ts}">
@@ -217,36 +334,67 @@ class RaySharpNvrPanel extends HTMLElement {
         <div><b>${esc(TYPE[e.type] || e.type)}</b>${e.detail ? ` <span class="plate">${esc(e.detail)}</span>` : ""}
           <div class="sub">${esc(nameOf[e.channel] || `CH${e.channel}`)} · ${ago(e.ts)}</div></div></button>`;
     }).join("");
-    return `${this._header(n)}
-      <div class="tools">
-        <span class="sub">Размер:</span>${["s", "m", "l"].map((s) => `<button class="tab ${this._size === s ? "on" : ""}" data-do="size" data-s="${s}">${{ s: "мелко", m: "средне", l: "крупно" }[s]}</button>`).join("")}
-        <label class="sub"><input type="checkbox" id="mf" ${this._motionFirst ? "checked" : ""}> с движением — вверх</label>
-        ${hidden ? `<label class="sub"><input type="checkbox" id="se" ${this._showEmpty ? "checked" : ""}> пустые каналы (${hidden})</label>` : ""}
-      </div>
-      <div class="layout">
-        <div class="grid ${this._size}">${chans.map((c) => this._tile(n, c)).join("")}</div>
-        <aside class="feed card"><div class="hrow"><h2>События</h2><span class="grow"></span>
-          <select id="period" class="sel">${PERIODS.map(([p, l]) => `<option value="${p}" ${p === this._period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-          <div class="tabs"><button class="tab ${this._filter ? "" : "on"}" data-do="filter" data-t="">все</button>${types.map((t) =>
-            `<button class="tab ${this._filter === t ? "on" : ""}" data-do="filter" data-t="${esc(t)}">${esc(TYPE[t] || t)}</button>`).join("")}</div>
-          ${feed || '<div class="muted">За этот период событий нет</div>'}
-          ${this._events.filter((e) => !this._filter || e.type === this._filter).length > (this._feedLimit || 100)
-            ? '<button class="act more" data-do="more">Показать ещё</button>' : ""}</aside>
-      </div>`;
+    return `<div class="hrow"><h2>События</h2><span class="grow"></span>
+        <select data-opt="period" class="sel">${PERIODS.map(([p, l]) => `<option value="${p}" ${p === this._period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="tabs"><button class="tab ${this._filter ? "" : "on"}" data-do="filter" data-t="">все</button>${types.map((t) =>
+        `<button class="tab ${this._filter === t ? "on" : ""}" data-do="filter" data-t="${esc(t)}">${esc(TYPE[t] || t)}</button>`).join("")}</div>
+      ${feed || '<div class="muted">За этот период событий нет</div>'}
+      ${list.length > (this._feedLimit || 100) ? '<button class="act more" data-do="more">Показать ещё</button>' : ""}`;
   }
 
+  _onClick(ev) {
+    const b = ev.target.closest("[data-do]");
+    if (!b) return;
+    const d = b.dataset;
+    switch (d.do) {
+      case "open":
+        this._open = { entry: d.entry, num: Number(d.num), clip: d.ts ? Number(d.ts) : null };
+        this._renderModal(); return;
+      case "size": this._size = d.s; store.set("size", d.s); break;
+      case "filter": this._filter = d.t; this._feedLimit = 100; break;
+      case "more": this._feedLimit = (this._feedLimit || 100) + 100; break;
+      case "ask": this._confirm = { entry: d.entry, action: d.a }; break;
+      case "cancel": this._confirm = null; break;
+      case "go": this._confirm = null;
+        this._act({ type: "raysharp_nvr/action", entry_id: d.entry, action: d.a }, d.a); return;
+      default: return;
+    }
+    this._render();
+  }
+
+  _onChange(ev) {
+    const el = ev.target;
+    switch (el.dataset.opt) {
+      case "mf": this._motionFirst = el.checked; store.set("motion_first", el.checked ? 1 : 0); break;
+      case "se": this._showEmpty = el.checked; break;
+      case "live":
+        this._liveGrid = el.checked; store.set("live_grid", el.checked ? 1 : 0);
+        for (const t of this._tiles.values()) { t.mode = ""; t.liveFailed = false; t.media.innerHTML = ""; }
+        break;
+      case "period":
+        this._period = Number(el.value); this._feedLimit = 100;
+        store.set("period", this._period);
+        this._load(); return;
+      default: return;
+    }
+    this._render();
+  }
+
+  // ── camera window ─────────────────────────────────────────────────────
   _renderModal() {
     const host = this.shadowRoot.getElementById("modal");
     if (!host) return;
-    if (!this._open) { host.innerHTML = ""; this._stream = null; return; }
+    if (!this._open) { host.innerHTML = ""; host.dataset.key = ""; this._stream = null; return; }
     const n = this._nvrs.find((x) => x.entry_id === this._open.entry);
     const ch = n && n.channels.find((c) => c.num === this._open.num);
     if (!ch) { host.innerHTML = ""; return; }
     const act = this._active(n, ch);
     const evs = this._events.filter((e) => e.channel === ch.num).slice(0, 12);
-    const key = `${n.entry_id}:${ch.num}:${this._open.clip || "live"}`;
+    const profiles = PROFILES.filter(([p]) => p === "auto" || (ch.streams || []).includes(p));
+    const profile = profiles.some(([p]) => p === this._profile) ? this._profile : "auto";
+    const key = `${n.entry_id}:${ch.num}:${this._open.clip || "live"}:${profile}`;
     if (host.firstChild && host.dataset.key === key) {
-      // Keep the live stream element; refresh only the side info.
+      // Keep the playing video; refresh only the info below it.
       const info = host.querySelector("#info");
       if (info) info.innerHTML = this._modalInfo(n, ch, act, evs);
       this._bindModal(host, n, ch);
@@ -258,12 +406,17 @@ class RaySharpNvrPanel extends HTMLElement {
         ${this._open.clip ? `<span class="chip">запись ${hhmm(this._open.clip)}</span><button class="act" data-do="live">● Прямой эфир</button>` : '<span class="chip onair">● эфир</span>'}
         <span class="grow"></span>
         <button class="x" data-do="close" aria-label="Закрыть">✕</button></div>
+      ${this._open.clip ? "" : `<div class="tabs prof">${profiles.map(([p, l]) =>
+        `<button class="tab ${p === profile ? "on" : ""}" data-prof="${p}">${l}</button>`).join("")}</div>`}
       <div id="live" class="live"></div>
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
+    this._stream = null;
     if (this._open.clip && ch.camera) {
       this._playClip(live, ch, this._open.clip);
+    } else if (profile !== "auto" && ch.camera) {
+      this._playProfile(live, ch, profile, key);
     } else if (st && customElements.get("ha-camera-stream")) {
       const el = document.createElement("ha-camera-stream");
       el.hass = this._hass; el.stateObj = st; el.muted = true; el.controls = true; el.allowExoPlayer = true;
@@ -276,8 +429,19 @@ class RaySharpNvrPanel extends HTMLElement {
     this._bindModal(host, n, ch);
   }
 
+  async _playProfile(box, ch, profile, key) {
+    box.innerHTML = '<div class="noimg">Подключаюсь…</div>';
+    try {
+      const res = await this._hass.callWS({ type: "raysharp_nvr/stream", camera: ch.camera, profile });
+      if (this.shadowRoot.getElementById("modal").dataset.key !== key) return;
+      const p = await makePlayer(this._hass, res.url, { controls: true });
+      box.innerHTML = ""; box.appendChild(p);
+    } catch (e) {
+      box.innerHTML = `<div class="noimg">${esc(e.message || e)}</div>`;
+    }
+  }
+
   async _playClip(box, ch, ts) {
-    this._stream = null;
     box.innerHTML = '<div class="noimg">Открываю запись…</div>';
     let res;
     try {
@@ -287,16 +451,8 @@ class RaySharpNvrPanel extends HTMLElement {
       return;
     }
     if (!this._open || this._open.clip !== ts) return; // closed meanwhile
-    box.innerHTML = "";
-    if (customElements.get("ha-hls-player")) {
-      const p = document.createElement("ha-hls-player");
-      p.hass = this._hass; p.url = res.url; p.controls = true; p.muted = true; p.autoplay = true; p.playsInline = true;
-      box.appendChild(p);
-    } else {
-      const v = document.createElement("video");
-      v.src = res.url; v.controls = true; v.muted = true; v.autoplay = true; v.playsInline = true;
-      box.appendChild(v);
-    }
+    const p = await makePlayer(this._hass, res.url, { controls: true });
+    box.innerHTML = ""; box.appendChild(p);
     const note = document.createElement("div");
     note.className = "sub cliphint";
     note.textContent = `Отрывок: ${res.before} с до и ${res.after} с после события. Запись с регистратора подгружается несколько секунд.`;
@@ -331,6 +487,10 @@ class RaySharpNvrPanel extends HTMLElement {
       if (b.dataset.do === "live") { this._open = { ...this._open, clip: null }; this._renderModal(); }
       if (b.dataset.do === "snap") this._act({ type: "raysharp_nvr/action", entry_id: n.entry_id, action: "snapshot", channel: ch.num }, "snap");
     }; });
+    host.querySelectorAll("[data-prof]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      this._profile = b.dataset.prof; store.set("profile", this._profile); this._renderModal();
+    }; });
     host.querySelectorAll("[data-clip]").forEach((b) => { b.onclick = (ev) => {
       ev.stopPropagation();
       this._open = { ...this._open, clip: Number(b.dataset.clip) }; this._renderModal();
@@ -342,35 +502,6 @@ class RaySharpNvrPanel extends HTMLElement {
       b.onpointerdown = () => send("Start");
       b.onpointerup = b.onpointerleave = () => send("Stop");
     });
-  }
-
-  _bind(root) {
-    root.querySelectorAll("[data-do]").forEach((b) => b.addEventListener("click", () => {
-      const d = b.dataset;
-      switch (d.do) {
-        case "open":
-          this._open = { entry: d.entry, num: Number(d.num), clip: d.ts ? Number(d.ts) : null };
-          this._renderModal(); return;
-        case "size": this._size = d.s; break;
-        case "filter": this._filter = d.t; this._feedLimit = 100; break;
-        case "more": this._feedLimit = (this._feedLimit || 100) + 100; break;
-        case "ask": this._confirm = { entry: d.entry, action: d.a }; break;
-        case "cancel": this._confirm = null; break;
-        case "go": this._confirm = null;
-          this._act({ type: "raysharp_nvr/action", entry_id: d.entry, action: d.a }, d.a); return;
-      }
-      this._render();
-    }));
-    const mf = root.querySelector("#mf");
-    if (mf) mf.addEventListener("change", () => { this._motionFirst = mf.checked; this._render(); });
-    const pe = root.querySelector("#period");
-    if (pe) pe.addEventListener("change", () => {
-      this._period = Number(pe.value); this._feedLimit = 100;
-      try { localStorage.setItem("raysharp_nvr_period", String(this._period)); } catch (e) {}
-      this._load();
-    });
-    const se = root.querySelector("#se");
-    if (se) se.addEventListener("change", () => { this._showEmpty = se.checked; this._render(); });
   }
 }
 
@@ -420,6 +551,12 @@ const STYLE = `
   .tile.lost { opacity: .7; }
   .img { position: relative; aspect-ratio: 16 / 9; background: #111; }
   .img img { width: 100%; height: 100%; object-fit: cover; display:block; }
+  .media { position: absolute; inset: 0; overflow: hidden; }
+  .media .tilevid, .media video { width: 100%; height: 100%; display: block; object-fit: cover; pointer-events: none;
+    --video-max-height: 100%; }
+  .ovl { position: absolute; inset: 0; pointer-events: none; }
+  .tile { display: block; }
+  .prof { margin-bottom: 8px; }
   .noimg { width: 100%; height: 100%; display:flex; align-items:center; justify-content:center; color: #bbb; font-size: 13px; aspect-ratio: 16/9; background: #222; }
   .noimg.sm { aspect-ratio: 16/9; }
   .badge { position: absolute; left: 6px; top: 6px; background: var(--error-color, #c62828); color: #fff; font-size: 12px; font-weight: 600;

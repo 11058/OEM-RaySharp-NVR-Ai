@@ -38,6 +38,13 @@ def _ent(reg, domain: str, unique_id: str) -> str | None:
     return reg.async_get_entity_id(domain, DOMAIN, unique_id)
 
 
+def _profiles(hass: HomeAssistant, entity_id: str | None) -> list[str]:
+    cam = _raysharp_camera(hass, entity_id) if entity_id else None
+    if cam is None or not hasattr(cam, "profile_urls"):
+        return []
+    return [p for p in ("main", "sub", "mobile") if p in cam.profile_urls()]
+
+
 def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
     from .sensor import (  # noqa: PLC0415 - entity module, imported lazily
         _get_channel_list_for_sensors,
@@ -93,6 +100,7 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
                 "recording": coord.record_flags.get(num),
                 "active": active,
                 "motion_switch": _ent(reg, "switch", f"{mac}_ch{num}_motion_alarm"),
+                "streams": _profiles(hass, cam),
                 "ptz": any(
                     "ptz" in a.lower() for a in getattr(coord, "channel_abilities", {}).get(num, [])
                 ),
@@ -328,9 +336,8 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     from homeassistant.components.camera import DynamicStreamSettings  # noqa: PLC0415
     from homeassistant.components.stream import create_stream  # noqa: PLC0415
 
-    component = hass.data.get("camera")
-    cam = component.get_entity(msg["camera"]) if component else None
-    if cam is None or cam.platform.platform_name != DOMAIN:
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
         connection.send_error(msg["id"], "not_found", "Камера не найдена")
         return
     live = await cam.stream_source() or ""
@@ -374,7 +381,100 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     )
 
 
+_LIVE = f"{DOMAIN}_live_streams"
+
+
+def _raysharp_camera(hass: HomeAssistant, entity_id: str):
+    component = hass.data.get("camera")
+    cam = component.get_entity(entity_id) if component else None
+    if cam is None or cam.platform.platform_name != DOMAIN:
+        return None
+    return cam
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/stream",
+        vol.Required("camera"): str,
+        vol.Required("profile"): vol.In(["main", "sub", "mobile", "lowest"]),
+    }
+)
+@websocket_api.async_response
+async def ws_stream(hass: HomeAssistant, connection, msg: dict) -> None:
+    """HLS URL for one stream profile of a camera (for the grid and phones).
+
+    "lowest" picks mobile, then sub, then main. Streams are shared between
+    viewers and stop by themselves a few minutes after the last one leaves.
+    """
+    from homeassistant.components.camera import DynamicStreamSettings  # noqa: PLC0415
+    from homeassistant.components.stream import create_stream  # noqa: PLC0415
+
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None or not hasattr(cam, "profile_urls"):
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    urls = cam.profile_urls()
+    profile = msg["profile"]
+    if profile == "lowest":
+        profile = next((p for p in ("mobile", "sub", "main") if p in urls), "")
+    source = urls.get(profile)
+    if not source:
+        connection.send_error(msg["id"], "no_stream", "Такого потока у камеры нет")
+        return
+    live: dict = hass.data.setdefault(_LIVE, {})
+    key = (msg["camera"], profile)
+    stream = live.get(key)
+    if stream is None or "hls" not in stream.outputs():
+        try:
+            stream = create_stream(
+                hass, source, dict(getattr(cam, "stream_options", None) or {}),
+                DynamicStreamSettings(), stream_label=f"{msg['camera']} {profile}",
+            )  # fmt: skip
+            stream.add_provider("hls")
+            await stream.start()
+        except Exception as err:  # noqa: BLE001 - shown in the panel
+            connection.send_error(msg["id"], "stream", f"Поток не открылся: {err}")
+            return
+        live[key] = stream
+    connection.send_result(msg["id"], {"url": stream.endpoint_url("hls"), "profile": profile})
+
+
+# Read-only NVR calls for diagnosing firmware differences from the panel side.
+_RAW_ALLOWED = ("/API/Playback/", "/API/AI/", "/API/Event/", "/API/Log/")
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/api",
+        vol.Required("entry_id"): str,
+        vol.Required("path"): str,
+        vol.Optional("data"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_api(hass: HomeAssistant, connection, msg: dict) -> None:
+    path = msg["path"]
+    last = path.rstrip("/").rsplit("/", 1)[-1]
+    if not path.startswith(_RAW_ALLOWED) or not (
+        last in ("Get", "Search", "Range") or last.startswith(("Get", "Search"))
+    ):
+        connection.send_error(msg["id"], "forbidden", "Только чтение: */Get, */Search")
+        return
+    coord = hass.data.get(DOMAIN, {}).get(msg["entry_id"])
+    if coord is None or not hasattr(coord, "client"):
+        connection.send_error(msg["id"], "not_found", "NVR не загружен")
+        return
+    try:
+        resp = await coord.client.async_api_call(path, msg.get("data"))
+    except Exception as err:  # noqa: BLE001 - diagnostics
+        connection.send_error(msg["id"], "nvr", str(err))
+        return
+    connection.send_result(msg["id"], resp)
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
-    for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip):
+    for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
+                    ws_stream, ws_api):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
