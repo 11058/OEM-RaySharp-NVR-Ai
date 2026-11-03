@@ -16,7 +16,7 @@ from .const import (
     DEFAULT_EVENT_TIMEOUT,
     DOMAIN,
 )
-from .events import async_get_event_log
+from .events import get_event_log
 
 # Per-channel detection binary sensors (unique_id suffix -> panel label key).
 DETECTIONS = [
@@ -141,15 +141,21 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
     }
 
 
-@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/overview"})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/overview",
+        vol.Optional("since"): vol.Coerce(float),
+        vol.Optional("limit", default=400): vol.All(int, vol.Range(min=1, max=3000)),
+    }
+)
 @callback
 def ws_overview(hass: HomeAssistant, connection, msg: dict) -> None:
-    log = async_get_event_log(hass)
+    log = get_event_log(hass)
     connection.send_result(
         msg["id"],
         {
             "nvrs": [_nvr_view(hass, e, c) for e, c in _entries(hass)],
-            "events": log.recent(120),
+            "events": log.recent(msg["limit"], msg.get("since")),
         },
     )
 
@@ -159,7 +165,7 @@ def ws_overview(hass: HomeAssistant, connection, msg: dict) -> None:
 )
 @callback
 def ws_event_picture(hass: HomeAssistant, connection, msg: dict) -> None:
-    pic = async_get_event_log(hass).pictures.get(msg["event_id"])
+    pic = get_event_log(hass).pictures.get(msg["event_id"])
     connection.send_result(msg["id"], {"image": pic})
 
 
@@ -177,7 +183,7 @@ def ws_subscribe(hass: HomeAssistant, connection, msg: dict) -> None:
     def _changed() -> None:
         connection.send_message(websocket_api.event_message(msg["id"], {"changed": True}))
 
-    unsubs.append(async_get_event_log(hass).listen(_event))
+    unsubs.append(get_event_log(hass).listen(_event))
     for _entry, coord in _entries(hass):
         unsubs.append(coord.async_add_listener(_changed))
 

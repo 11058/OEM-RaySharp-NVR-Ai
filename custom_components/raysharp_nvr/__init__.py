@@ -1338,6 +1338,12 @@ async def _async_migrate_image_entity_ids(
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up RaySharp NVR from a config entry."""
+    # The panel's event log must listen before the coordinator loops start,
+    # or the startup backfill of AI detections would go past it.
+    from .events import async_setup_event_log  # noqa: PLC0415
+
+    await async_setup_event_log(hass)
+
     await _async_migrate_image_entity_ids(hass, entry)
 
     client = RaySharpNVRClient(

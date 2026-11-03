@@ -25,10 +25,10 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
     if hass.data.get(KEY):
         return
     hass.data[KEY] = True
-    from .events import async_get_event_log
+    from .events import async_setup_event_log
     from .websocket_api import async_register_websocket
 
-    async_get_event_log(hass)  # start collecting events right away
+    await async_setup_event_log(hass)
     async_register_websocket(hass)
     if not (WWW / BUNDLE).is_file():
         _LOGGER.warning("Panel bundle missing, video panel not registered")

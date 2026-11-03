@@ -39,6 +39,7 @@ from .const import (
     API_AI_PVD_SETUP,
     API_AI_SCHEDULE,
     API_AI_VHD_COUNT,
+    API_AI_VHD_GET,
     API_ALARM_FD,
     API_ALARM_LCD,
     API_ALARM_PID,
@@ -165,6 +166,9 @@ AI_POLL_INTERVAL = 10.0
 # Bursts happen (hundreds of detections in a couple of minutes); cap the
 # per-poll fetch so one busy minute can't pull megabytes of JPEGs at once.
 AI_POLL_MAX_BATCH = 20
+# Fallback for firmware that refuses SnapedObjects to non-admin accounts.
+VHD_BACKFILL_HOURS = 24
+VHD_MAX_PER_POLL = 40
 # A window wide enough to never need the NVR's clock, which runs in its own
 # local time and does not match Home Assistant's.
 _AI_SEARCH_WINDOW = {
@@ -558,6 +562,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._ai_task and not self._ai_task.done():
             return
         self._ai_cursor = None
+        self._ai_source = "objects"
         self._ai_task = self.hass.async_create_background_task(
             self._async_ai_poll_loop(),
             "raysharp_nvr_ai_poll",
@@ -588,18 +593,66 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except RaySharpNVRApiError as err:
                 self._ai_last_error = str(err)
                 if err.error_code == "no_permission":
-                    # Rights don't change under us; retrying every few seconds
-                    # would just fill the log forever.
+                    # Some firmware keeps SnapedObjects to admin even with every
+                    # right ticked, yet answers the person/vehicle log. Switch
+                    # to that; stop only if it is refused too.
                     _LOGGER.info(
-                        "NVR account may not search AI detections, so they "
-                        "cannot be polled — grant it AI rights, or rely on "
-                        "the NVR's own event push. Polling stopped."
+                        "NVR refuses AI database search (%s); falling back to "
+                        "the person/vehicle log", err,
                     )
-                    break
+                    if not await self._async_vhd_loop():
+                        break
+                    continue
                 _LOGGER.debug("AI detection poll refused: %s", err)
             except Exception as err:  # noqa: BLE001 — loop must survive anything
                 self._ai_last_error = str(err)
                 _LOGGER.debug("AI detection poll failed: %s", err)
+
+    async def _async_vhd_loop(self) -> bool:
+        """Poll /API/AI/VhdLog/GetByIndex per channel by time window.
+
+        Returns False when the NVR refuses this too (nothing more to try).
+        """
+        since = datetime.now() - timedelta(hours=VHD_BACKFILL_HOURS)
+        while True:
+            until = datetime.now()
+            refused = 0
+            channels = sorted(self.channel_abilities) or [
+                channel_num_from_str(
+                    ch.get("channel", "") if isinstance(ch, dict) else "", i + 1
+                )
+                for i, ch in enumerate(get_channel_list(self.data or {}))
+            ]
+            for number in channels:
+                try:
+                    resp = await self.client.async_api_call(
+                        API_AI_VHD_GET,
+                        {
+                            "Chn": [number - 1],
+                            "StartTime": since.strftime("%Y-%m-%d %H:%M:%S"),
+                            "EndTime": until.strftime("%Y-%m-%d %H:%M:%S"),
+                        },
+                    )
+                except RaySharpNVRApiError as err:
+                    self._ai_last_error = str(err)
+                    if err.error_code == "no_permission":
+                        refused += 1
+                    continue
+                except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
+                    self._ai_last_error = str(err)
+                    continue
+                items = self._extract_data(resp).get("SnapedObjInfo") or []
+                if items:
+                    self._dispatch_ai_records(items[-VHD_MAX_PER_POLL:])
+            if channels and refused == len(channels):
+                _LOGGER.info("NVR refuses the person/vehicle log too; AI polling stopped")
+                return False
+            if not refused:
+                self._ai_last_error = None
+            self._ai_source = "vhd"
+            # Overlap a little: rows are written after the detection ends.
+            since = until - timedelta(seconds=60)
+            await asyncio.sleep(max(AI_POLL_INTERVAL, 15.0))
 
     async def _async_poll_ai_detections(self) -> None:
         """Fetch detections recorded since the previous poll and dispatch them.
@@ -816,6 +869,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {
             "running": bool(task and not task.done()),
             "cursor": self._ai_cursor,
+            "source": getattr(self, "_ai_source", "objects"),
             "dispatched": self._ai_dispatched,
             "last_error": self._ai_last_error,
         }

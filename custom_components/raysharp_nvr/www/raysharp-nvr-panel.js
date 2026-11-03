@@ -26,7 +26,17 @@ const PTZ = [["↖", "Ptz_Cmd_LeftUp"], ["↑", "Ptz_Cmd_Up"], ["↗", "Ptz_Cmd_
   ["←", "Ptz_Cmd_Left"], ["", ""], ["→", "Ptz_Cmd_Right"],
   ["↙", "Ptz_Cmd_LeftDown"], ["↓", "Ptz_Cmd_Down"], ["↘", "Ptz_Cmd_RightDown"]];
 
-const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const PERIODS = [[3600, "1 ч"], [6 * 3600, "6 ч"], [86400, "сутки"], [3 * 86400, "3 дня"], [7 * 86400, "неделя"]];
+function loadPeriod() {
+  try { const v = Number(localStorage.getItem("raysharp_nvr_period")); if (PERIODS.some(([p]) => p === v)) return v; } catch (e) {}
+  return 86400;
+}
+function hhmm(ts) {
+  const d = new Date(ts * 1000);
+  const t = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  if (d.toDateString() === new Date().toDateString()) return t;
+  return `${d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })} ${t.slice(0, 5)}`;
+}
 function ago(ts) {
   const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
   if (s < 60) return `${s} с назад`;
@@ -45,6 +55,7 @@ class RaySharpNvrPanel extends HTMLElement {
     this._size = "m";
     this._motionFirst = true;
     this._showEmpty = false;
+    this._period = loadPeriod();
     this._filter = "";
     this._open = null; // {entry, num}
     this._confirm = null;
@@ -73,7 +84,9 @@ class RaySharpNvrPanel extends HTMLElement {
         if (msg.event) {
           const i = this._events.findIndex((e) => e.id === msg.event.id);
           if (i >= 0) this._events[i] = msg.event; else this._events.unshift(msg.event);
-          this._events = this._events.slice(0, 150);
+          this._events.sort((a, b) => b.ts - a.ts);
+          const cut = Date.now() / 1000 - this._period;
+          this._events = this._events.filter((e) => e.ts >= cut).slice(0, 1000);
           this._render();
         } else {
           clearTimeout(this._deb); this._deb = setTimeout(() => this._load(), 800);
@@ -93,7 +106,9 @@ class RaySharpNvrPanel extends HTMLElement {
   async _load() {
     if (!this._hass) return;
     try {
-      const res = await this._hass.callWS({ type: "raysharp_nvr/overview" });
+      const res = await this._hass.callWS({
+        type: "raysharp_nvr/overview", since: Date.now() / 1000 - this._period, limit: 1000,
+      });
       this._nvrs = res.nvrs || [];
       this._events = res.events || [];
       this._error = "";
@@ -194,7 +209,7 @@ class RaySharpNvrPanel extends HTMLElement {
     }
     const nameOf = Object.fromEntries(n.channels.map((c) => [c.num, c.name]));
     const types = [...new Set(this._events.map((e) => e.type))];
-    const feed = this._events.filter((e) => !this._filter || e.type === this._filter).slice(0, 60).map((e) => {
+    const feed = this._events.filter((e) => !this._filter || e.type === this._filter).slice(0, this._feedLimit || 100).map((e) => {
       const pic = e.picture ? this._pics.get(e.id) : null;
       if (e.picture && !this._pics.has(e.id)) this._picture(e.id);
       return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${e.ts}">
@@ -210,10 +225,13 @@ class RaySharpNvrPanel extends HTMLElement {
       </div>
       <div class="layout">
         <div class="grid ${this._size}">${chans.map((c) => this._tile(n, c)).join("")}</div>
-        <aside class="feed card"><h2>События</h2>
+        <aside class="feed card"><div class="hrow"><h2>События</h2><span class="grow"></span>
+          <select id="period" class="sel">${PERIODS.map(([p, l]) => `<option value="${p}" ${p === this._period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
           <div class="tabs"><button class="tab ${this._filter ? "" : "on"}" data-do="filter" data-t="">все</button>${types.map((t) =>
             `<button class="tab ${this._filter === t ? "on" : ""}" data-do="filter" data-t="${esc(t)}">${esc(TYPE[t] || t)}</button>`).join("")}</div>
-          ${feed || '<div class="muted">Событий пока нет</div>'}</aside>
+          ${feed || '<div class="muted">За этот период событий нет</div>'}
+          ${this._events.filter((e) => !this._filter || e.type === this._filter).length > (this._feedLimit || 100)
+            ? '<button class="act more" data-do="more">Показать ещё</button>' : ""}</aside>
       </div>`;
   }
 
@@ -334,7 +352,8 @@ class RaySharpNvrPanel extends HTMLElement {
           this._open = { entry: d.entry, num: Number(d.num), clip: d.ts ? Number(d.ts) : null };
           this._renderModal(); return;
         case "size": this._size = d.s; break;
-        case "filter": this._filter = d.t; break;
+        case "filter": this._filter = d.t; this._feedLimit = 100; break;
+        case "more": this._feedLimit = (this._feedLimit || 100) + 100; break;
         case "ask": this._confirm = { entry: d.entry, action: d.a }; break;
         case "cancel": this._confirm = null; break;
         case "go": this._confirm = null;
@@ -344,6 +363,12 @@ class RaySharpNvrPanel extends HTMLElement {
     }));
     const mf = root.querySelector("#mf");
     if (mf) mf.addEventListener("change", () => { this._motionFirst = mf.checked; this._render(); });
+    const pe = root.querySelector("#period");
+    if (pe) pe.addEventListener("change", () => {
+      this._period = Number(pe.value); this._feedLimit = 100;
+      try { localStorage.setItem("raysharp_nvr_period", String(this._period)); } catch (e) {}
+      this._load();
+    });
     const se = root.querySelector("#se");
     if (se) se.addEventListener("change", () => { this._showEmpty = se.checked; this._render(); });
   }
@@ -378,6 +403,11 @@ const STYLE = `
   .tab { border: 1px solid var(--divider-color); background: transparent; color: var(--primary-text-color);
     border-radius: 14px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
   .tab.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: var(--primary-color); }
+  .sel { background: var(--card-background-color); color: var(--primary-text-color); border: 1px solid var(--divider-color);
+    border-radius: 8px; padding: 3px 6px; font-size: 13px; }
+  .more { width: 100%; margin-top: 8px; }
+  .feed h2 { margin: 0; }
+  .feed .hrow { margin-bottom: 8px; }
   .tabs { display:flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
   .layout { display:grid; grid-template-columns: 1fr 320px; gap: 12px; align-items: start; }
   .grid { display:grid; gap: 8px; }

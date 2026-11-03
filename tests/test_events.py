@@ -28,12 +28,31 @@ def test_repeated_alarm_extends_not_duplicates():
     assert len(log.events) == 2
 
 
-def test_history_and_manual_snapshots_skipped():
+def test_history_kept_with_its_own_time():
     log = events.EventLog()
-    old = (dt.datetime.now() - dt.timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
-    log.add_snapshot({"channel": 1, "alarm_type": "vehicle", "start_time": old, "image": "x"})
+    old = dt.datetime.now() - dt.timedelta(hours=3)
+    log.add_alarm({"channel": 1, "alarm_type": "motion"})
+    log.add_snapshot({"channel": 2, "alarm_type": "vehicle", "snap_id": 9,
+                      "start_time": old.strftime("%Y-%m-%d %H:%M:%S"), "image": "x"})
+    log.add_snapshot({"channel": 2, "alarm_type": "vehicle", "snap_id": 9,
+                      "start_time": old.strftime("%Y-%m-%d %H:%M:%S"), "image": "x"})
     log.add_snapshot({"channel": 1, "alarm_type": "manual", "image": "x"})
-    assert not log.events
+    newest, oldest = log.recent()
+    assert newest["type"] == "motion"
+    assert oldest["history"] and oldest["picture"] and abs(oldest["ts"] - old.timestamp()) < 2
+    assert len(log.events) == 2  # backfill repeat did not duplicate
+
+
+def test_dump_and_load_round_trip():
+    log = events.EventLog()
+    log.add_snapshot({"channel": 1, "alarm_type": "person", "snap_id": 1,
+                      "image": "AAA", "start_time": time.time()})
+    saved, pics = log.dump(), dict(log.pictures)
+    again = events.EventLog()
+    again.load(saved, pics)
+    assert again.recent()[0]["picture"] and again.pictures == pics
+    again.add_alarm({"channel": 5, "alarm_type": "motion"})
+    assert again.recent()[0]["id"] > saved["events"][0]["id"]
 
 
 def test_plate_detail_and_doorbell():
@@ -54,6 +73,7 @@ def test_picture_cap():
                           "start_time": time.time()})
     assert len(log.pictures) == events.MAX_PICTURES
     assert sum(1 for e in log.events if e["picture"]) == events.MAX_PICTURES
+    assert log.recent()[0]["picture"]  # the newest keeps its picture
 
 
 def test_is_recent():
