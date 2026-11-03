@@ -602,8 +602,64 @@ async def ws_probe_playback(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], {"ok": not why, "why": why})
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/av",
+        vol.Required("camera"): str,
+        vol.Optional("profile", default="main"): vol.In(["main", "sub", "mobile"]),
+        vol.Optional("ts"): vol.Coerce(float),
+        vol.Optional("until"): vol.Coerce(float),
+    }
+)
+@websocket_api.async_response
+async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Signed URL of an MP4 with sound (AAC) for the camera window: live when
+    no `ts` is given, otherwise the recording around `ts` like raysharp_nvr/clip.
+    HLS from HA's stream component drops the cameras' G.711 audio."""
+    from .av_view import new_token, signed_url  # noqa: PLC0415
+
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None or not hasattr(cam, "profile_urls"):
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    urls = cam.profile_urls()
+    if msg.get("ts") is None:
+        source = urls.get(msg["profile"]) or await cam.stream_source()
+        if not source:
+            connection.send_error(msg["id"], "no_stream", "Такого потока у камеры нет")
+            return
+        token = new_token(hass, source, None)
+        connection.send_result(msg["id"], {"url": signed_url(hass, token, connection.refresh_token_id)})
+        return
+    live = await cam.stream_source() or ""
+    if "/rtsp/streaming" not in live:
+        connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
+        return
+    ts = msg["ts"]
+    end = None
+    if msg.get("until") and msg["until"] > ts:
+        end = min(msg["until"] + 5, ts + 600)
+    url = await _playback_source(hass, msg["camera"], live, ts, end)
+    if not url:
+        connection.send_error(
+            msg["id"], "no_recording",
+            "Регистратор не отдал запись за это время: "
+            + "; ".join(hass.data.get(f"{DOMAIN}_clip_reasons", {}).get(msg["camera"], [])),
+        )  # fmt: skip
+        return
+    duration = (end or ts + CLIP_AFTER_S) - (ts - CLIP_BEFORE_S)
+    token = new_token(hass, url, duration)
+    connection.send_result(msg["id"], {
+        "url": signed_url(hass, token, connection.refresh_token_id),
+        "before": CLIP_BEFORE_S, "after": int(end - ts) if end else CLIP_AFTER_S,
+    })
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
+    from .av_view import RaySharpAvView  # noqa: PLC0415
+
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
-                    ws_stream, ws_api, ws_probe_playback):  # fmt: skip
+                    ws_stream, ws_api, ws_probe_playback, ws_av):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
+    hass.http.register_view(RaySharpAvView(hass))

@@ -467,10 +467,21 @@ class RaySharpNvrPanel extends HTMLElement {
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
     this._stream = null;
+    const hlsLive = () => {
+      if (profile !== "auto") return this._playProfile(live, ch, profile, key);
+      if (st && customElements.get("ha-camera-stream")) {
+        const el = document.createElement("ha-camera-stream");
+        el.hass = this._hass; el.stateObj = st; el.muted = false; el.controls = true; el.allowExoPlayer = true;
+        live.innerHTML = ""; live.appendChild(el); this._stream = el;
+      }
+    };
     if (this._open.clip && ch.camera) {
-      this._playClip(live, ch, this._open.clip, this._open.until);
-    } else if (profile !== "auto" && ch.camera) {
-      this._playProfile(live, ch, profile, key);
+      const { clip, until } = this._open;
+      this._playAv(live, key, { camera: ch.camera, ts: clip, ...(until ? { until } : {}) },
+        () => this._playClip(live, ch, clip, until), "Открываю запись…");
+    } else if (ch.camera) {
+      this._playAv(live, key, { camera: ch.camera, profile: profile === "auto" ? "main" : profile },
+        hlsLive, "Подключаюсь…");
     } else if (st && customElements.get("ha-camera-stream")) {
       const el = document.createElement("ha-camera-stream");
       el.hass = this._hass; el.stateObj = st; el.muted = true; el.controls = true; el.allowExoPlayer = true;
@@ -481,6 +492,46 @@ class RaySharpNvrPanel extends HTMLElement {
       live.innerHTML = '<div class="noimg">нет видео</div>';
     }
     this._bindModal(host, n, ch);
+  }
+
+  // MP4 from the integration with the camera's sound re-encoded to AAC:
+  // HA's HLS drops the G.711 audio these cameras send. Falls back to HLS
+  // (silent) when ffmpeg cannot open the source or the browser cannot play it.
+  async _playAv(box, key, msg, fallback, wait) {
+    const host = () => this.shadowRoot && this.shadowRoot.getElementById("modal");
+    const current = () => box.isConnected && host() && host().dataset.key === key;
+    box.innerHTML = `<div class="noimg">${wait}</div>`;
+    let res;
+    try {
+      res = await this._hass.callWS({ type: "raysharp_nvr/av", ...msg });
+    } catch (e) {
+      if (!current()) return;
+      if (e && e.code === "no_recording") { box.innerHTML = `<div class="noimg">${esc(e.message)}</div>`; return; }
+      fallback(); return;
+    }
+    if (!current()) return;
+    const v = document.createElement("video");
+    v.controls = true; v.autoplay = true; v.playsInline = true; v.muted = false;
+    let done = false;
+    v.addEventListener("error", () => {
+      if (done || !current()) return;
+      done = true;
+      box.parentNode.querySelectorAll(".cliphint").forEach((n) => n.remove());
+      fallback();
+    }, { once: true });
+    v.addEventListener("playing", () => { done = true; }, { once: true });
+    v.src = this._hass.hassUrl ? this._hass.hassUrl(res.url) : res.url;
+    box.innerHTML = ""; box.appendChild(v);
+    if (res.before !== undefined) {
+      const note = document.createElement("div");
+      note.className = "sub cliphint";
+      note.textContent = `Отрывок: ${res.before} с до и ${res.after} с после события. Запись с регистратора подгружается несколько секунд.`;
+      box.after(note);
+    }
+    try { await v.play(); } catch (e) {
+      // Autoplay with sound refused: play muted, the controls unmute it.
+      if (e && e.name === "NotAllowedError") { v.muted = true; v.play().catch(() => {}); }
+    }
   }
 
   async _playProfile(box, ch, profile, key) {
