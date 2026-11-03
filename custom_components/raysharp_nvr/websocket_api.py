@@ -93,6 +93,9 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
                 "recording": coord.record_flags.get(num),
                 "active": active,
                 "motion_switch": _ent(reg, "switch", f"{mac}_ch{num}_motion_alarm"),
+                "ptz": any(
+                    "ptz" in a.lower() for a in getattr(coord, "channel_abilities", {}).get(num, [])
+                ),
             }
         )
 
@@ -235,7 +238,84 @@ async def ws_action(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], {"ok": True})
 
 
+CLIP_BEFORE_S = 10
+CLIP_AFTER_S = 30
+CLIP_LIFETIME_S = 240
+_CLIPS = f"{DOMAIN}_clips"
+
+
+def playback_url(live: str, start: float, end: float) -> str | None:
+    """Live RTSP URL of a channel -> the NVR's playback URL for a time window.
+
+    RaySharp firmware serves recordings at /rtsp/playback with the same query
+    as /rtsp/streaming plus starttime/endtime in the NVR's local time, written
+    with a literal Z that the NVR ignores.
+    """
+    import datetime as dt  # noqa: PLC0415
+
+    if "/rtsp/streaming" not in live:
+        return None
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    t0 = dt.datetime.fromtimestamp(start).strftime(fmt)
+    t1 = dt.datetime.fromtimestamp(end).strftime(fmt)
+    url = live.replace("/rtsp/streaming", "/rtsp/playback", 1)
+    return f"{url}{'&' if '?' in url else '?'}starttime={t0}&endtime={t1}"
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/clip",
+        vol.Required("camera"): str,
+        vol.Required("ts"): vol.Coerce(float),
+    }
+)
+@websocket_api.async_response
+async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Start an HLS stream of the recording around an event; returns its URL."""
+    from homeassistant.components.camera import DynamicStreamSettings  # noqa: PLC0415
+    from homeassistant.components.stream import create_stream  # noqa: PLC0415
+
+    component = hass.data.get("camera")
+    cam = component.get_entity(msg["camera"]) if component else None
+    if cam is None or cam.platform.platform_name != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    live = await cam.stream_source()
+    url = playback_url(live or "", msg["ts"] - CLIP_BEFORE_S, msg["ts"] + CLIP_AFTER_S)
+    if not url:
+        connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
+        return
+
+    clips: dict = hass.data.setdefault(_CLIPS, {})
+    key = (msg["camera"], int(msg["ts"]))
+    stream = clips.get(key)
+    if stream is None:
+        try:
+            stream = create_stream(
+                hass, url, dict(getattr(cam, "stream_options", None) or {}),
+                DynamicStreamSettings(), stream_label=f"{msg['camera']} clip",
+            )  # fmt: skip
+            stream.add_provider("hls")
+            await stream.start()
+        except Exception as err:  # noqa: BLE001 - shown in the panel
+            connection.send_error(msg["id"], "stream", f"Не удалось открыть запись: {err}")
+            return
+        clips[key] = stream
+
+        async def _stop(_now=None) -> None:
+            clips.pop(key, None)
+            await stream.stop()
+
+        from homeassistant.helpers.event import async_call_later  # noqa: PLC0415
+
+        async_call_later(hass, CLIP_LIFETIME_S, _stop)
+    connection.send_result(
+        msg["id"],
+        {"url": stream.endpoint_url("hls"), "before": CLIP_BEFORE_S, "after": CLIP_AFTER_S},
+    )
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
-    for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action):
+    for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip):
         websocket_api.async_register_command(hass, handler)

@@ -121,7 +121,7 @@ class RaySharpNvrPanel extends HTMLElement {
     const now = Date.now() / 1000;
     const types = new Set(ch.active.map((s) => SUFFIX[s] || "motion"));
     for (const ev of this._events) {
-      if (now - ev.ts > nvr.event_timeout) break;
+      if (now - (ev.last || ev.ts) > nvr.event_timeout) continue;
       if (ev.channel === ch.num) types.add(ev.type);
     }
     return PRIORITY.filter((t) => types.has(t));
@@ -197,7 +197,7 @@ class RaySharpNvrPanel extends HTMLElement {
     const feed = this._events.filter((e) => !this._filter || e.type === this._filter).slice(0, 60).map((e) => {
       const pic = e.picture ? this._pics.get(e.id) : null;
       if (e.picture && !this._pics.has(e.id)) this._picture(e.id);
-      return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}">
+      return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${e.ts}">
         ${pic ? `<img src="${pic}" alt="">` : `<div class="evicon">${esc((TYPE[e.type] || "?").slice(0, 1))}</div>`}
         <div><b>${esc(TYPE[e.type] || e.type)}</b>${e.detail ? ` <span class="plate">${esc(e.detail)}</span>` : ""}
           <div class="sub">${esc(nameOf[e.channel] || `CH${e.channel}`)} · ${ago(e.ts)}</div></div></button>`;
@@ -226,22 +226,27 @@ class RaySharpNvrPanel extends HTMLElement {
     if (!ch) { host.innerHTML = ""; return; }
     const act = this._active(n, ch);
     const evs = this._events.filter((e) => e.channel === ch.num).slice(0, 12);
-    if (host.firstChild && host.dataset.key === `${n.entry_id}:${ch.num}`) {
+    const key = `${n.entry_id}:${ch.num}:${this._open.clip || "live"}`;
+    if (host.firstChild && host.dataset.key === key) {
       // Keep the live stream element; refresh only the side info.
       const info = host.querySelector("#info");
       if (info) info.innerHTML = this._modalInfo(n, ch, act, evs);
       this._bindModal(host, n, ch);
       return;
     }
-    host.dataset.key = `${n.entry_id}:${ch.num}`;
+    host.dataset.key = key;
     host.innerHTML = `<div class="overlay" data-do="close-bg"><div class="sheet">
-      <div class="shead"><b>${esc(ch.name)}</b><span class="sub">CH${ch.num}</span><span class="grow"></span>
-        <button class="x" data-do="close">✕</button></div>
+      <div class="shead"><b>${esc(ch.name)}</b><span class="sub">CH${ch.num}</span>
+        ${this._open.clip ? `<span class="chip">запись ${hhmm(this._open.clip)}</span><button class="act" data-do="live">● Прямой эфир</button>` : '<span class="chip onair">● эфир</span>'}
+        <span class="grow"></span>
+        <button class="x" data-do="close" aria-label="Закрыть">✕</button></div>
       <div id="live" class="live"></div>
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
-    if (st && customElements.get("ha-camera-stream")) {
+    if (this._open.clip && ch.camera) {
+      this._playClip(live, ch, this._open.clip);
+    } else if (st && customElements.get("ha-camera-stream")) {
       const el = document.createElement("ha-camera-stream");
       el.hass = this._hass; el.stateObj = st; el.muted = true; el.controls = true; el.allowExoPlayer = true;
       live.appendChild(el); this._stream = el;
@@ -253,9 +258,36 @@ class RaySharpNvrPanel extends HTMLElement {
     this._bindModal(host, n, ch);
   }
 
+  async _playClip(box, ch, ts) {
+    this._stream = null;
+    box.innerHTML = '<div class="noimg">Открываю запись…</div>';
+    let res;
+    try {
+      res = await this._hass.callWS({ type: "raysharp_nvr/clip", camera: ch.camera, ts });
+    } catch (e) {
+      box.innerHTML = `<div class="noimg">${esc(e.message || e)}</div>`;
+      return;
+    }
+    if (!this._open || this._open.clip !== ts) return; // closed meanwhile
+    box.innerHTML = "";
+    if (customElements.get("ha-hls-player")) {
+      const p = document.createElement("ha-hls-player");
+      p.hass = this._hass; p.url = res.url; p.controls = true; p.muted = true; p.autoplay = true; p.playsInline = true;
+      box.appendChild(p);
+    } else {
+      const v = document.createElement("video");
+      v.src = res.url; v.controls = true; v.muted = true; v.autoplay = true; v.playsInline = true;
+      box.appendChild(v);
+    }
+    const note = document.createElement("div");
+    note.className = "sub cliphint";
+    note.textContent = `Отрывок: ${res.before} с до и ${res.after} с после события. Запись с регистратора подгружается несколько секунд.`;
+    box.after(note);
+  }
+
   _modalInfo(n, ch, act, evs) {
     evs.filter((e) => e.picture).forEach((e) => this._picture(e.id));
-    const ptz = this._admin ? `<div class="ptz">${PTZ.map(([l, c]) => c
+    const ptz = this._admin && ch.ptz ? `<div class="ptz">${PTZ.map(([l, c]) => c
       ? `<button class="act" data-ptz="${c}">${l}</button>` : "<span></span>").join("")}</div>` : "";
     return `<div class="hrow wrap">
         ${act.length ? act.map((t) => `<span class="chip on">${esc(TYPE[t] || t)}</span>`).join("") : '<span class="sub">сейчас спокойно</span>'}
@@ -264,11 +296,12 @@ class RaySharpNvrPanel extends HTMLElement {
         ${this._admin ? `<button class="act" data-do="snap">📷 Снимок</button>` : ""}
       </div>
       ${ptz}
-      <h3>События этой камеры</h3>
+      <h3>События этой камеры — нажмите, чтобы посмотреть запись</h3>
       <div class="evrow">${evs.map((e) => {
         const pic = this._pics.get(e.id);
-        return `<div class="evc">${pic ? `<img src="${pic}" alt="">` : '<div class="noimg sm"></div>'}
-          <div class="sub">${esc(TYPE[e.type] || e.type)}${e.detail ? ` ${esc(e.detail)}` : ""} · ${hhmm(e.ts)}</div></div>`;
+        const on = this._open.clip === e.ts;
+        return `<button class="evc ${on ? "on" : ""}" data-clip="${e.ts}">${pic ? `<img src="${pic}" alt="">` : `<div class="noimg sm">▶</div>`}
+          <div class="sub">▶ ${esc(TYPE[e.type] || e.type)}${e.detail ? ` ${esc(e.detail)}` : ""} · ${hhmm(e.ts)}</div></button>`;
       }).join("") || '<span class="sub">нет</span>'}</div>`;
   }
 
@@ -277,7 +310,13 @@ class RaySharpNvrPanel extends HTMLElement {
       if (b.dataset.do === "close-bg" && ev.target !== b) return;
       ev.stopPropagation();
       if (b.dataset.do === "close" || b.dataset.do === "close-bg") { this._open = null; this._renderModal(); }
+      if (b.dataset.do === "live") { this._open = { ...this._open, clip: null }; this._renderModal(); }
       if (b.dataset.do === "snap") this._act({ type: "raysharp_nvr/action", entry_id: n.entry_id, action: "snapshot", channel: ch.num }, "snap");
+    }; });
+    host.querySelectorAll("[data-clip]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      this._open = { ...this._open, clip: Number(b.dataset.clip) }; this._renderModal();
+      host.querySelector(".sheet")?.scrollIntoView({ block: "start" });
     }; });
     host.querySelectorAll("[data-ptz]").forEach((b) => {
       const send = (state) => this._hass.callWS({ type: "raysharp_nvr/action", entry_id: n.entry_id,
@@ -291,7 +330,9 @@ class RaySharpNvrPanel extends HTMLElement {
     root.querySelectorAll("[data-do]").forEach((b) => b.addEventListener("click", () => {
       const d = b.dataset;
       switch (d.do) {
-        case "open": this._open = { entry: d.entry, num: Number(d.num) }; this._renderModal(); return;
+        case "open":
+          this._open = { entry: d.entry, num: Number(d.num), clip: d.ts ? Number(d.ts) : null };
+          this._renderModal(); return;
         case "size": this._size = d.s; break;
         case "filter": this._filter = d.t; break;
         case "ask": this._confirm = { entry: d.entry, action: d.a }; break;
@@ -365,10 +406,20 @@ const STYLE = `
   .plate { font-family: monospace; background: #ffd54f; color: #000; padding: 0 4px; border-radius: 3px; }
   .act { border: 1px solid var(--divider-color); background: transparent; color: var(--primary-text-color); border-radius: 8px; padding: 4px 10px; cursor: pointer; font-size: 13px; }
   .act.primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: var(--primary-color); }
-  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display:flex; justify-content:center; align-items:flex-start; padding: 20px 10px; overflow-y:auto; z-index: 10; }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display:flex; justify-content:center; align-items:flex-start;
+    padding: calc(20px + env(safe-area-inset-top)) 10px calc(20px + env(safe-area-inset-bottom)); overflow-y:auto; z-index: 10;
+    overscroll-behavior: contain; }
   .sheet { background: var(--card-background-color); border-radius: 14px; width: 100%; max-width: 980px; padding: 12px; box-sizing: border-box; }
-  .shead { display:flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 16px; }
-  .x { border: none; background: transparent; color: var(--secondary-text-color); font-size: 18px; cursor: pointer; }
+  .shead { display:flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; font-size: 16px;
+    position: sticky; top: 0; z-index: 2; background: var(--card-background-color); padding: 4px 0; }
+  .x { border: none; background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 20px;
+    width: 40px; height: 40px; border-radius: 50%; cursor: pointer; flex: none; }
+  .chip.onair { color: #ff5252; }
+  .cliphint { margin-top: 6px; }
+  .live video, .live ha-hls-player { width: 100%; display: block; }
+  button.evc { border: 2px solid transparent; background: transparent; padding: 0; text-align: left; color: var(--primary-text-color); cursor: pointer; border-radius: 8px; }
+  button.evc.on { border-color: var(--primary-color); }
+  .noimg.sm { font-size: 22px; }
   .live { background: #000; border-radius: 8px; overflow: hidden; min-height: 200px; }
   .live img, .live ha-camera-stream { width: 100%; display:block; }
   .ptz { display:grid; grid-template-columns: repeat(3, 44px); gap: 4px; margin-top: 10px; }
@@ -376,7 +427,11 @@ const STYLE = `
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .feed { position: static; max-height: none; } }
-  @media (max-width: 600px) { .body { padding: 8px; } .grid.m, .grid.l { grid-template-columns: 1fr; } .grid.s { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  @media (max-width: 600px) {
+    .overlay { padding: 0; background: var(--card-background-color); }
+    .sheet { border-radius: 0; min-height: 100%; padding: calc(8px + env(safe-area-inset-top)) 10px calc(16px + env(safe-area-inset-bottom)); }
+    .shead { top: calc(-8px - env(safe-area-inset-top)); padding-top: calc(8px + env(safe-area-inset-top)); margin-top: calc(-8px - env(safe-area-inset-top)); }
+    .body { padding: 8px; } .grid.m, .grid.l { grid-template-columns: 1fr; } .grid.s { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 `;
 
 if (!customElements.get("raysharp-nvr-panel")) customElements.define("raysharp-nvr-panel", RaySharpNvrPanel);

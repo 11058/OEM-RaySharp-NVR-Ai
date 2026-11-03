@@ -253,6 +253,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ec_polls = 0
         self.record_flags: dict[int, bool] = {}
         self.snapshot_errors: dict[int, str] = {}
+        self.channel_abilities: dict[int, list[str]] = {}
         self._ec_errors = 0
         self._ec_dispatches = 0
         self._ec_last_error: str | None = None
@@ -739,9 +740,16 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not isinstance(entry, dict):
                 continue
             for ch in entry.get("channel_alarm") or []:
-                if not isinstance(ch, dict) or "record_flag" not in ch:
+                if not isinstance(ch, dict):
                     continue
                 digits = "".join(c for c in str(ch.get("channel", "")) if c.isdigit())
+                status = ch.get("camera_connect_status")
+                if digits and isinstance(status, dict):
+                    self.channel_abilities[int(digits)] = [
+                        str(a) for a in (status.get("ability") or [])
+                    ] + [str(a) for a in (status.get("intelligent_ability") or [])]
+                if "record_flag" not in ch:
+                    continue
                 if digits:
                     self.record_flags[int(digits)] = _recording(ch.get("record_flag"))
 

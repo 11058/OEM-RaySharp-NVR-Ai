@@ -42,8 +42,8 @@ class EventLog:
     def _find(self, channel: Any, kind: str, snap_id: Any) -> dict | None:
         now = time.time()
         for ev in reversed(self.events):
-            if now - ev["ts"] > MERGE_WINDOW_S:
-                break
+            if now - ev.get("last", ev["ts"]) > MERGE_WINDOW_S:
+                continue
             if snap_id and ev.get("snap_id") == snap_id:
                 return ev
             if ev["channel"] == channel and ev["type"] == kind:
@@ -60,15 +60,16 @@ class EventLog:
                     e["picture"] = False
                     break
 
-    def add_alarm(self, data: dict[str, Any]) -> None:
+    def add_alarm(self, data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Record an alarm; returns the entry and whether it is a new one."""
         channel = data.get("channel", 0)
         kind = str(data.get("alarm_type") or "motion")
         snap_id = data.get("snap_id")
         ev = self._find(channel, kind, snap_id)
         if ev is not None:
-            ev["ts"] = time.time()  # still going on
+            ev["last"] = time.time()  # still going on
             self._notify(ev)
-            return
+            return ev, False
         ev = {
             "id": next(self._ids),
             "ts": time.time(),
@@ -80,6 +81,15 @@ class EventLog:
             "detail": "",
         }
         self.events.append(ev)
+        self._notify(ev)
+        return ev, True
+
+    def attach_frame(self, ev: dict[str, Any], image: str) -> None:
+        """A camera frame taken at alarm time, unless a detection crop came first."""
+        if ev.get("picture") and ev["id"] in self.pictures:
+            return
+        ev["frame"] = True
+        self._keep_picture(ev, image)
         self._notify(ev)
 
     def add_snapshot(self, data: dict[str, Any]) -> None:
@@ -106,6 +116,7 @@ class EventLog:
         if detail:
             ev["detail"] = str(detail)
         if data.get("image"):
+            ev["frame"] = False  # the NVR's own detection picture wins
             self._keep_picture(ev, str(data["image"]))
         self._notify(ev)
 
@@ -163,9 +174,38 @@ def async_get_event_log(hass) -> EventLog:
     log = EventLog()
     hass.data[KEY] = log
 
+    last_frame: dict[Any, float] = {}
+
+    async def _grab_frame(ev: dict[str, Any]) -> None:
+        """Most NVR alarms carry no picture: take one from the camera now."""
+        from .const import API_SNAPSHOT, DOMAIN
+
+        coords = [c for c in hass.data.get(DOMAIN, {}).values() if hasattr(c, "client")]
+        if len(coords) != 1:
+            return  # cannot tell which NVR the channel belongs to
+        key = ev["channel"]
+        now = time.monotonic()
+        if now - last_frame.get(key, 0.0) < 4:
+            return
+        last_frame[key] = now
+        try:
+            resp = await coords[0].client.async_api_call(
+                API_SNAPSHOT,
+                {"channel": f"CH{ev['channel']}", "snapshot_resolution": "1280 x 720",
+                 "reset_session_timeout": False},
+            )  # fmt: skip
+        except Exception:  # noqa: BLE001 - a missing frame is not an error
+            return
+        data = resp.get("data", resp) if isinstance(resp, dict) else {}
+        img = data.get("img_data") or data.get("ima_data")
+        if img:
+            log.attach_frame(ev, str(img))
+
     @callback
     def _alarm(event: Event) -> None:
-        log.add_alarm(dict(event.data))
+        ev, new = log.add_alarm(dict(event.data))
+        if new and ev["channel"]:
+            hass.async_create_background_task(_grab_frame(ev), "raysharp_nvr alarm frame")
 
     @callback
     def _snapshot(event: Event) -> None:

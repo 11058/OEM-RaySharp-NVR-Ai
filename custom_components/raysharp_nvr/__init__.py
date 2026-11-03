@@ -703,7 +703,13 @@ async def _async_configure_event_push(
     webhook_path = f"/api/webhook/{webhook_id}"
     parsed = urlparse(internal_url)
     ha_host = parsed.hostname or "127.0.0.1"
-    ha_port = parsed.port or 8123
+    # A URL without an explicit port means the scheme's default (80/443), not
+    # 8123: HA set to listen on 80 got its webhook pointed at 8123 on every
+    # start. The NVR pushes plain HTTP, so prefer the port HA really serves.
+    ha_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    server_port = getattr(getattr(hass, "http", None), "server_port", None)
+    if isinstance(server_port, int) and parsed.scheme == "https" and parsed.port is None:
+        ha_port = server_port
 
     _LOGGER.info(
         "EventPush webhook URL (use this in NVR Push-events settings): "
