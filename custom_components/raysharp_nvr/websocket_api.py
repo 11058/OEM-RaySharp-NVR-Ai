@@ -107,12 +107,14 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
         warnings.append(f"NVR не отдаёт кадры ({chans}): {first}")
     ai_err = str(getattr(coord, "_ai_last_error", "") or "")
     if "permission" in ai_err.lower():
-        warnings.append("NVR отказал в поиске AI-событий: нет прав")
-    if warnings and any("permission" in w.lower() or "прав" in w for w in warnings + list(snap_err.values())):
+        # Seen with every right ticked: this firmware keeps its picture database
+        # to the admin account. Pictures still arrive with the pushed alarms.
         warnings.append(
-            "Похоже, у пользователя NVR, указанного в HA, нет прав на просмотр, "
-            "поиск или настройки — выдайте их в NVR (Пользователи → права) или укажите admin."
+            "Поиск по базе AI-снимков NVR недоступен этой учётке (no_permission) — "
+            "история кадров после перезапуска HA не подтягивается; новые события с кадрами приходят."
         )
+    if snap_err and any("permission" in v.lower() or "401" in v for v in snap_err.values()):
+        warnings.append("Проверьте права пользователя NVR на живой просмотр.")
 
     return {
         "entry_id": entry.entry_id,
@@ -244,22 +246,67 @@ CLIP_LIFETIME_S = 240
 _CLIPS = f"{DOMAIN}_clips"
 
 
-def playback_url(live: str, start: float, end: float) -> str | None:
+# Ways RaySharp firmware has been seen to want the playback window: ISO time
+# with a Z that is either honoured (UTC) or ignored (NVR local), or compact.
+PLAYBACK_VARIANTS = ("iso-utc", "iso-local", "compact-utc", "compact-local")
+_VARIANT = f"{DOMAIN}_playback_variant"
+
+
+def playback_url(live: str, start: float, end: float, variant: str = "iso-local") -> str | None:
     """Live RTSP URL of a channel -> the NVR's playback URL for a time window.
 
     RaySharp firmware serves recordings at /rtsp/playback with the same query
-    as /rtsp/streaming plus starttime/endtime in the NVR's local time, written
-    with a literal Z that the NVR ignores.
+    as /rtsp/streaming plus starttime/endtime.
     """
     import datetime as dt  # noqa: PLC0415
 
     if "/rtsp/streaming" not in live:
         return None
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    t0 = dt.datetime.fromtimestamp(start).strftime(fmt)
-    t1 = dt.datetime.fromtimestamp(end).strftime(fmt)
+    fmt = "%Y-%m-%dT%H:%M:%SZ" if variant.startswith("iso") else "%Y%m%dT%H%M%SZ"
+    if variant.endswith("utc"):
+        t0 = dt.datetime.fromtimestamp(start, dt.UTC).strftime(fmt)
+        t1 = dt.datetime.fromtimestamp(end, dt.UTC).strftime(fmt)
+    else:
+        t0 = dt.datetime.fromtimestamp(start).strftime(fmt)
+        t1 = dt.datetime.fromtimestamp(end).strftime(fmt)
     url = live.replace("/rtsp/streaming", "/rtsp/playback", 1)
     return f"{url}{'&' if '?' in url else '?'}starttime={t0}&endtime={t1}"
+
+
+def _has_video(url: str) -> bool:
+    """Open the RTSP source and read a few packets: is there picture?"""
+    import av  # noqa: PLC0415
+
+    try:
+        with av.open(
+            url, options={"rtsp_transport": "tcp", "timeout": "6000000"}, timeout=8
+        ) as box:
+            if not box.streams.video:
+                return False
+            for n, packet in enumerate(box.demux(box.streams.video[0])):
+                if packet.size:
+                    return True
+                if n > 50:
+                    break
+    except Exception:  # noqa: BLE001 - any failure means "not this variant"
+        return False
+    return False
+
+
+async def _playback_source(hass: HomeAssistant, camera: str, live: str, ts: float) -> str | None:
+    """Find (once per camera) which playback form the NVR answers with video."""
+    known: dict = hass.data.setdefault(_VARIANT, {})
+    start, end = ts - CLIP_BEFORE_S, ts + CLIP_AFTER_S
+    order = [known[camera]] if camera in known else list(PLAYBACK_VARIANTS)
+    for variant in order:
+        url = playback_url(live, start, end, variant)
+        if url and await hass.async_add_executor_job(_has_video, url):
+            known[camera] = variant
+            return url
+    if camera in known:  # remembered form stopped working: search again
+        known.pop(camera)
+        return await _playback_source(hass, camera, live, ts)
+    return None
 
 
 @websocket_api.websocket_command(
@@ -280,10 +327,16 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     if cam is None or cam.platform.platform_name != DOMAIN:
         connection.send_error(msg["id"], "not_found", "Камера не найдена")
         return
-    live = await cam.stream_source()
-    url = playback_url(live or "", msg["ts"] - CLIP_BEFORE_S, msg["ts"] + CLIP_AFTER_S)
-    if not url:
+    live = await cam.stream_source() or ""
+    if "/rtsp/streaming" not in live:
         connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
+        return
+    url = await _playback_source(hass, msg["camera"], live, msg["ts"])
+    if not url:
+        connection.send_error(
+            msg["id"], "no_recording",
+            "Регистратор не отдал запись за это время (нет записи или формат не подошёл)",
+        )  # fmt: skip
         return
 
     clips: dict = hass.data.setdefault(_CLIPS, {})
