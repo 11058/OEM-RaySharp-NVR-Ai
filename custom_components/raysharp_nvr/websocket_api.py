@@ -291,24 +291,30 @@ def playback_url(live: str, start: float, end: float, variant: str = "iso-local"
     return f"{url}{'&' if '?' in url else '?'}starttime={t0}&endtime={t1}"
 
 
-def _has_video(url: str) -> bool:
-    """Open the RTSP source and read a few packets: is there picture?"""
+def _probe(url: str, timeout: float = 12) -> str:
+    """Open the RTSP source and read a few packets; "" if there is picture,
+    otherwise why not (for the panel and for picking a playback form)."""
     import av  # noqa: PLC0415
 
     try:
         with av.open(
-            url, options={"rtsp_transport": "tcp", "timeout": "6000000"}, timeout=8
+            url, options={"rtsp_transport": "tcp", "timeout": str(int(timeout * 1e6))},
+            timeout=timeout,
         ) as box:
             if not box.streams.video:
-                return False
+                return "нет видеодорожки"
             for n, packet in enumerate(box.demux(box.streams.video[0])):
                 if packet.size:
-                    return True
+                    return ""
                 if n > 50:
                     break
-    except Exception:  # noqa: BLE001 - any failure means "not this variant"
-        return False
-    return False
+            return "поток пустой"
+    except Exception as err:  # noqa: BLE001 - reported, not raised
+        return str(err).replace(url, "<url>")[:120] or type(err).__name__
+
+
+def _has_video(url: str) -> bool:
+    return _probe(url) == ""
 
 
 async def _playback_source(
@@ -318,11 +324,15 @@ async def _playback_source(
     known: dict = hass.data.setdefault(_VARIANT, {})
     start, end = ts - CLIP_BEFORE_S, end or ts + CLIP_AFTER_S
     order = [known[camera]] if camera in known else list(PLAYBACK_VARIANTS)
+    reasons = hass.data.setdefault(f"{DOMAIN}_clip_reasons", {})
+    reasons[camera] = []
     for variant in order:
         url = playback_url(live, start, end, variant)
-        if url and await hass.async_add_executor_job(_has_video, url):
+        why = await hass.async_add_executor_job(_probe, url) if url else "нет адреса"
+        if not why:
             known[camera] = variant
             return url
+        reasons[camera].append(f"{variant}: {why}")
     if camera in known:  # remembered form stopped working: search again
         known.pop(camera)
         return await _playback_source(hass, camera, live, ts, end)
@@ -358,7 +368,8 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     if not url:
         connection.send_error(
             msg["id"], "no_recording",
-            "Регистратор не отдал запись за это время (нет записи или формат не подошёл)",
+            "Регистратор не отдал запись за это время: "
+            + "; ".join(hass.data.get(f"{DOMAIN}_clip_reasons", {}).get(msg["camera"], [])),
         )  # fmt: skip
         return
 

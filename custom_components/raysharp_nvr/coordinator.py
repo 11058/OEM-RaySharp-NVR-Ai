@@ -685,6 +685,14 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     added += 1
         return added
 
+    def _all_channel_indexes(self) -> list[int]:
+        """0-based indexes of every channel the NVR reports."""
+        channels = get_channel_list(self.data or {})
+        return [
+            channel_num_from_str(ch.get("channel", "") if isinstance(ch, dict) else "", i + 1) - 1
+            for i, ch in enumerate(channels)
+        ] or list(range(16))
+
     async def _async_vhd_loop(self) -> bool:
         """Poll /API/AI/VhdLog/GetByIndex per channel by time window.
 
@@ -717,6 +725,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 except (RaySharpNVRAuthError, RaySharpNVRConnectionError) as err:
                     self._ai_last_error = str(err)
+                    if "404" in str(err):
+                        refused += 1  # the firmware has no such API
                     continue
                 items = self._extract_data(resp).get("SnapedObjInfo") or []
                 if items:
@@ -743,7 +753,9 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 {
                     "MsgId": None,
                     **_AI_SEARCH_WINDOW,
-                    "Chn": [],
+                    # Some firmware answers no_permission to Chn: [] ("all")
+                    # yet accepts the same search with every channel listed.
+                    "Chn": self._all_channel_indexes(),
                     "SortType": 1,
                     "Engine": 0,
                     "Type": _AI_OBJECT_TYPES,

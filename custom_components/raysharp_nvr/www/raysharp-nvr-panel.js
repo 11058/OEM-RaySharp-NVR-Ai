@@ -69,6 +69,9 @@ function ensurePlayer() {
 }
 
 async function makePlayer(hass, url, { controls = false } = {}) {
+  // ha-hls-player resolves the variant playlist against its url, so it must
+  // be absolute: a bare /api/hls/... path throws "Invalid base URL".
+  url = hass.hassUrl ? hass.hassUrl(url) : new URL(url, location.origin).href;
   if (await ensurePlayer()) {
     const p = document.createElement("ha-hls-player");
     p.hass = hass; p.url = url; p.controls = controls; p.muted = true;
@@ -228,10 +231,15 @@ class RaySharpNvrPanel extends HTMLElement {
   _header(n) {
     const disks = n.disks.map((d, i) => {
       const used = d.total_gb ? 100 - Math.round((d.free_gb / d.total_gb) * 100) : 0;
-      const ok = !d.status || /normal|ok|норм/i.test(String(d.status));
+      const st = String(d.status || "");
+      // Full / Overwrite is the normal state of a recorder: it writes over
+      // the oldest footage. Only other states are a problem.
+      const cycling = /overwrite|full/i.test(st);
+      const ok = !st || cycling || /normal|ok|норм/i.test(st);
+      const label = cycling ? "заполнен, запись идёт поверх старой" : st;
       return `<div class="disk"><span class="sub">Диск ${i + 1}</span>
         <div class="bar"><div style="width:${used}%"></div></div>
-        <span class="sub ${ok ? "" : "bad"}">${d.total_gb ? `${(d.total_gb / 1024).toFixed(1)} ТБ, свободно ${d.free_gb} ГБ` : ""} ${esc(d.status || "")}</span></div>`;
+        <span class="sub ${ok ? "" : "bad"}">${d.total_gb ? `${(d.total_gb / 1024).toFixed(1)} ТБ${cycling ? "" : `, свободно ${d.free_gb} ГБ`}` : ""} · ${esc(label)}</span></div>`;
     }).join("");
     const armed = n.armed === "on";
     const ai = n.ai_today || {};

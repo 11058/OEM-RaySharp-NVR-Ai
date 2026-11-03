@@ -150,6 +150,17 @@ class EventLog:
                 return ev
         return None
 
+    def _near_record(self, channel: Any, when: float) -> dict | None:
+        """A recording segment of this camera that this detection falls into."""
+        for ev in reversed(self.events):
+            if ev["ts"] < when - 600:
+                break
+            if ev["channel"] != channel or ev.get("source") != "record" or ev.get("snap_id"):
+                continue
+            if ev.get("rec_start", ev["ts"]) - 5 <= when <= ev.get("rec_end", ev["ts"]) + 5:
+                return ev
+        return None
+
     def _by_snap(self, channel: Any, snap_id: Any) -> dict | None:
         if not snap_id:
             return None
@@ -195,6 +206,11 @@ class EventLog:
         ev = self._by_snap(channel, snap_id)  # already known: backfill repeats
         if ev is None and not history:
             ev = self._find(channel, kind, snap_id)
+        if ev is None and history:
+            ev = self._near_record(channel, when)
+            if ev is not None:
+                ev["type"] = kind  # "smart" segment -> what was actually seen
+                ev["snap_id"] = snap_id
         if ev is None:
             ev = self._new(when if history else now, channel, kind, snap_id=snap_id,
                            source="history" if history else "snapshot",
@@ -220,7 +236,9 @@ class EventLog:
                 break
             if ev["channel"] != channel:
                 continue
-            if ev.get("rec_start") == start or abs(ev["ts"] - start) <= 90:
+            if ev.get("rec_start") == start or abs(ev["ts"] - start) <= 90 or (
+                ev.get("history") and start - 5 <= ev["ts"] <= end + 5
+            ):
                 ev.setdefault("rec_start", start)
                 ev["rec_end"] = end
                 return False
@@ -238,10 +256,11 @@ class EventLog:
     # ── outputs ───────────────────────────────────────────────────────────
     def recent(self, limit: int = 100, since: float | None = None) -> list[dict[str, Any]]:
         """Newest first; `since` cuts by event time."""
-        if since is None:
-            return self.events[-limit:][::-1]
-        keys = [e["ts"] for e in self.events]
-        return self.events[bisect.bisect_left(keys, since):][-limit:][::-1]
+        start = 0
+        if since is not None:
+            start = bisect.bisect_left([e["ts"] for e in self.events], since)
+        rows = [e for e in self.events[start:] if e["channel"] or e["type"] == "doorbell"]
+        return rows[-limit:][::-1]
 
     def dump(self) -> dict[str, Any]:
         return {"next_id": self._next_id, "events": self.events}
@@ -347,8 +366,10 @@ async def async_setup_event_log(hass) -> EventLog:
 
     @callback
     def _alarm(event: Event) -> None:
+        if not event.data.get("channel"):
+            return  # NVR-wide flag, not a camera: noise in the journal
         ev, new = log.add_alarm(dict(event.data))
-        if new and ev["channel"]:
+        if new:
             hass.async_create_background_task(_grab_frame(ev), "raysharp_nvr alarm frame")
 
     @callback

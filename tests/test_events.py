@@ -111,3 +111,28 @@ def test_record_segments():
     assert not log.add_record(3, "smart", time.time() - 5, time.time())  # live alarm has it
     ev = log.recent()[-1]
     assert ev["history"] and ev["rec_end"] - ev["rec_start"] == 46
+
+
+def test_history_picture_lands_on_its_recording():
+    log = events.EventLog()
+    start = time.time() - 7200
+    log.add_record(4, "smart", start, start + 60)
+    when = dt.datetime.fromtimestamp(start + 20).strftime("%Y-%m-%d %H:%M:%S")
+    log.add_snapshot({"channel": 4, "alarm_type": "person", "snap_id": 5,
+                      "start_time": when, "image": "IMG"})
+    assert len(log.events) == 1
+    ev = log.events[0]
+    assert ev["type"] == "person" and ev["picture"] and ev["rec_end"] == start + 60
+    # and the other order: picture first, then the segment search
+    log2 = events.EventLog()
+    log2.add_snapshot({"channel": 4, "alarm_type": "vehicle", "snap_id": 6,
+                       "start_time": when, "image": "IMG"})
+    assert not log2.add_record(4, "smart", start, start + 60)
+    assert log2.events[0]["type"] == "vehicle" and log2.events[0]["rec_end"] == start + 60
+
+
+def test_nvr_wide_events_hidden():
+    log = events.EventLog()
+    log.add_alarm({"channel": 0, "alarm_type": "motion"})
+    log.add_alarm({"channel": 2, "alarm_type": "motion"})
+    assert [e["channel"] for e in log.recent()] == [2]
