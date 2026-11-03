@@ -1407,6 +1407,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # HA; snapshot ids are de-duplicated, so nothing doubles up where the push
     # path does work.
     coordinator.async_start_ai_poll_loop()
+    coordinator.async_start_record_history()
     entry.async_on_unload(coordinator.async_stop_ai_poll_loop)
 
     # Auto-configure NVR EventPush if enabled

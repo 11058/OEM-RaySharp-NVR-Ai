@@ -42,7 +42,11 @@ def _profiles(hass: HomeAssistant, entity_id: str | None) -> list[str]:
     cam = _raysharp_camera(hass, entity_id) if entity_id else None
     if cam is None or not hasattr(cam, "profile_urls"):
         return []
-    return [p for p in ("main", "sub", "mobile") if p in cam.profile_urls()]
+    dead = hass.data.get(_DEAD, {})
+    return [
+        p for p in ("main", "sub", "mobile")
+        if p in cam.profile_urls() and not dead.get((entity_id, p))
+    ]
 
 
 def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
@@ -307,10 +311,12 @@ def _has_video(url: str) -> bool:
     return False
 
 
-async def _playback_source(hass: HomeAssistant, camera: str, live: str, ts: float) -> str | None:
+async def _playback_source(
+    hass: HomeAssistant, camera: str, live: str, ts: float, end: float | None = None
+) -> str | None:
     """Find (once per camera) which playback form the NVR answers with video."""
     known: dict = hass.data.setdefault(_VARIANT, {})
-    start, end = ts - CLIP_BEFORE_S, ts + CLIP_AFTER_S
+    start, end = ts - CLIP_BEFORE_S, end or ts + CLIP_AFTER_S
     order = [known[camera]] if camera in known else list(PLAYBACK_VARIANTS)
     for variant in order:
         url = playback_url(live, start, end, variant)
@@ -319,7 +325,7 @@ async def _playback_source(hass: HomeAssistant, camera: str, live: str, ts: floa
             return url
     if camera in known:  # remembered form stopped working: search again
         known.pop(camera)
-        return await _playback_source(hass, camera, live, ts)
+        return await _playback_source(hass, camera, live, ts, end)
     return None
 
 
@@ -328,6 +334,7 @@ async def _playback_source(hass: HomeAssistant, camera: str, live: str, ts: floa
         vol.Required("type"): f"{DOMAIN}/clip",
         vol.Required("camera"): str,
         vol.Required("ts"): vol.Coerce(float),
+        vol.Optional("until"): vol.Coerce(float),
     }
 )
 @websocket_api.async_response
@@ -344,7 +351,10 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     if "/rtsp/streaming" not in live:
         connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
         return
-    url = await _playback_source(hass, msg["camera"], live, msg["ts"])
+    end = None
+    if msg.get("until") and msg["until"] > msg["ts"]:
+        end = min(msg["until"] + 5, msg["ts"] + 600)  # whole recorded segment
+    url = await _playback_source(hass, msg["camera"], live, msg["ts"], end)
     if not url:
         connection.send_error(
             msg["id"], "no_recording",
@@ -353,7 +363,7 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
         return
 
     clips: dict = hass.data.setdefault(_CLIPS, {})
-    key = (msg["camera"], int(msg["ts"]))
+    key = (msg["camera"], int(msg["ts"]), int(end or 0))
     stream = clips.get(key)
     if stream is None:
         try:
@@ -377,11 +387,13 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
         async_call_later(hass, CLIP_LIFETIME_S, _stop)
     connection.send_result(
         msg["id"],
-        {"url": stream.endpoint_url("hls"), "before": CLIP_BEFORE_S, "after": CLIP_AFTER_S},
+        {"url": stream.endpoint_url("hls"), "before": CLIP_BEFORE_S,
+         "after": int(end - msg["ts"]) if end else CLIP_AFTER_S},
     )
 
 
 _LIVE = f"{DOMAIN}_live_streams"
+_DEAD = f"{DOMAIN}_dead_profiles"
 
 
 def _raysharp_camera(hass: HomeAssistant, entity_id: str):
@@ -415,8 +427,21 @@ async def ws_stream(hass: HomeAssistant, connection, msg: dict) -> None:
         return
     urls = cam.profile_urls()
     profile = msg["profile"]
+    dead: dict = hass.data.setdefault(_DEAD, {})
     if profile == "lowest":
-        profile = next((p for p in ("mobile", "sub", "main") if p in urls), "")
+        # The mobile stream is published on some firmware but carries no
+        # picture; check once per camera and remember.
+        profile = ""
+        for cand in ("mobile", "sub", "main"):
+            if cand not in urls or dead.get((msg["camera"], cand)):
+                continue
+            if cand == "main" or await hass.async_add_executor_job(_has_video, urls[cand]):
+                profile = cand
+                break
+            dead[(msg["camera"], cand)] = True
+    elif dead.get((msg["camera"], profile)):
+        connection.send_error(msg["id"], "no_video", "В этом потоке у камеры нет видео")
+        return
     source = urls.get(profile)
     if not source:
         connection.send_error(msg["id"], "no_stream", "Такого потока у камеры нет")

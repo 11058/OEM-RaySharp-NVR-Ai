@@ -59,6 +59,27 @@ def is_recent(start_time: Any, max_age_s: int = RECENT_S) -> bool:
     return ts is None or time.time() - ts <= max_age_s
 
 
+def record_event_type(rec: dict[str, Any]) -> str | None:
+    """Recording segment -> journal event type; None for plain recording.
+
+    new_record_type letters seen: N normal, SN smart (AI), M motion,
+    A/I alarm input, P PIR. record_type is a bit mask (1 normal, 128 smart).
+    """
+    code = str(rec.get("new_record_type") or "").upper()
+    mask = rec.get("record_type")
+    if code in ("", "N") and mask in (None, 1, "1"):
+        return None
+    if "S" in code or (isinstance(mask, int) and mask & 128):
+        return "smart"
+    if "M" in code or (isinstance(mask, int) and mask & 2):
+        return "motion"
+    if "P" in code:
+        return "pir"
+    if "A" in code or "I" in code or (isinstance(mask, int) and mask & 4):
+        return "io"
+    return "motion" if code not in ("", "N") else None
+
+
 class EventLog:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []  # oldest first
@@ -187,6 +208,26 @@ class EventLog:
             ev["frame"] = False  # the NVR's own detection picture wins
             self._keep_picture(ev, str(data["image"]))
         self._notify(ev)
+
+    def add_record(self, channel: int, kind: str, start: float, end: float) -> bool:
+        """An event-triggered recording segment found on the NVR's disk.
+
+        Skipped when the same camera already has an entry for it (the live
+        alarm that caused it, or this segment from an earlier search).
+        """
+        for ev in reversed(self.events):
+            if ev["ts"] < start - 120:
+                break
+            if ev["channel"] != channel:
+                continue
+            if ev.get("rec_start") == start or abs(ev["ts"] - start) <= 90:
+                ev.setdefault("rec_start", start)
+                ev["rec_end"] = end
+                return False
+        ev = self._new(start, channel, kind, source="record", history=time.time() - start > RECENT_S,
+                       rec_start=start, rec_end=end)  # fmt: skip
+        self._notify(ev)
+        return True
 
     def add_doorbell(self, data: dict[str, Any]) -> None:
         if not data.get("ringing"):

@@ -10,6 +10,7 @@ const TYPE = {
   intrusion: "Вторжение", face: "Лицо", plate: "Номер", io: "Тревожный вход", doorbell: "Звонок",
   sound: "Звук", pir: "PIR", crowd: "Толпа", wander: "Блуждание", region_entrance: "Вход в зону",
   region_exiting: "Выход из зоны", occlusion: "Камеру закрыли", stationary_object: "Предмет", other: "Событие",
+  smart: "AI-обнаружение",
 };
 const SUFFIX = {
   motion_detected: "motion", person_detected: "person", vehicle_detected: "vehicle",
@@ -21,7 +22,7 @@ const SUFFIX = {
 // Most important first: what the badge on a tile should say.
 const PRIORITY = ["doorbell", "person", "vehicle", "intrusion", "line_crossing", "face", "plate",
   "region_entrance", "region_exiting", "crowd", "wander", "stationary_object", "occlusion", "io",
-  "pir", "sound", "motion", "other"];
+  "pir", "sound", "smart", "motion", "other"];
 const PTZ = [["↖", "Ptz_Cmd_LeftUp"], ["↑", "Ptz_Cmd_Up"], ["↗", "Ptz_Cmd_RightUp"],
   ["←", "Ptz_Cmd_Left"], ["", ""], ["→", "Ptz_Cmd_Right"],
   ["↙", "Ptz_Cmd_LeftDown"], ["↓", "Ptz_Cmd_Down"], ["↘", "Ptz_Cmd_RightDown"]];
@@ -329,7 +330,7 @@ class RaySharpNvrPanel extends HTMLElement {
     const feed = list.slice(0, this._feedLimit || 100).map((e) => {
       const pic = e.picture ? this._pics.get(e.id) : null;
       if (e.picture && !this._pics.has(e.id)) this._picture(e.id);
-      return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${e.ts}">
+      return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${e.ts}" data-end="${e.rec_end || ""}">
         ${pic ? `<img src="${pic}" alt="">` : `<div class="evicon">${esc((TYPE[e.type] || "?").slice(0, 1))}</div>`}
         <div><b>${esc(TYPE[e.type] || e.type)}</b>${e.detail ? ` <span class="plate">${esc(e.detail)}</span>` : ""}
           <div class="sub">${esc(nameOf[e.channel] || `CH${e.channel}`)} · ${ago(e.ts)}</div></div></button>`;
@@ -348,7 +349,8 @@ class RaySharpNvrPanel extends HTMLElement {
     const d = b.dataset;
     switch (d.do) {
       case "open":
-        this._open = { entry: d.entry, num: Number(d.num), clip: d.ts ? Number(d.ts) : null };
+        this._open = { entry: d.entry, num: Number(d.num), clip: d.ts ? Number(d.ts) : null,
+          until: d.end ? Number(d.end) : null };
         this._renderModal(); return;
       case "size": this._size = d.s; store.set("size", d.s); break;
       case "filter": this._filter = d.t; this._feedLimit = 100; break;
@@ -414,7 +416,7 @@ class RaySharpNvrPanel extends HTMLElement {
     const st = ch.camera && this._hass.states[ch.camera];
     this._stream = null;
     if (this._open.clip && ch.camera) {
-      this._playClip(live, ch, this._open.clip);
+      this._playClip(live, ch, this._open.clip, this._open.until);
     } else if (profile !== "auto" && ch.camera) {
       this._playProfile(live, ch, profile, key);
     } else if (st && customElements.get("ha-camera-stream")) {
@@ -441,11 +443,11 @@ class RaySharpNvrPanel extends HTMLElement {
     }
   }
 
-  async _playClip(box, ch, ts) {
+  async _playClip(box, ch, ts, until) {
     box.innerHTML = '<div class="noimg">Открываю запись…</div>';
     let res;
     try {
-      res = await this._hass.callWS({ type: "raysharp_nvr/clip", camera: ch.camera, ts });
+      res = await this._hass.callWS({ type: "raysharp_nvr/clip", camera: ch.camera, ts, ...(until ? { until } : {}) });
     } catch (e) {
       box.innerHTML = `<div class="noimg">${esc(e.message || e)}</div>`;
       return;
@@ -474,7 +476,7 @@ class RaySharpNvrPanel extends HTMLElement {
       <div class="evrow">${evs.map((e) => {
         const pic = this._pics.get(e.id);
         const on = this._open.clip === e.ts;
-        return `<button class="evc ${on ? "on" : ""}" data-clip="${e.ts}">${pic ? `<img src="${pic}" alt="">` : `<div class="noimg sm">▶</div>`}
+        return `<button class="evc ${on ? "on" : ""}" data-clip="${e.ts}" data-end="${e.rec_end || ""}">${pic ? `<img src="${pic}" alt="">` : `<div class="noimg sm">▶</div>`}
           <div class="sub">▶ ${esc(TYPE[e.type] || e.type)}${e.detail ? ` ${esc(e.detail)}` : ""} · ${hhmm(e.ts)}</div></button>`;
       }).join("") || '<span class="sub">нет</span>'}</div>`;
   }
@@ -484,7 +486,7 @@ class RaySharpNvrPanel extends HTMLElement {
       if (b.dataset.do === "close-bg" && ev.target !== b) return;
       ev.stopPropagation();
       if (b.dataset.do === "close" || b.dataset.do === "close-bg") { this._open = null; this._renderModal(); }
-      if (b.dataset.do === "live") { this._open = { ...this._open, clip: null }; this._renderModal(); }
+      if (b.dataset.do === "live") { this._open = { ...this._open, clip: null, until: null }; this._renderModal(); }
       if (b.dataset.do === "snap") this._act({ type: "raysharp_nvr/action", entry_id: n.entry_id, action: "snapshot", channel: ch.num }, "snap");
     }; });
     host.querySelectorAll("[data-prof]").forEach((b) => { b.onclick = (ev) => {
@@ -493,7 +495,8 @@ class RaySharpNvrPanel extends HTMLElement {
     }; });
     host.querySelectorAll("[data-clip]").forEach((b) => { b.onclick = (ev) => {
       ev.stopPropagation();
-      this._open = { ...this._open, clip: Number(b.dataset.clip) }; this._renderModal();
+      this._open = { ...this._open, clip: Number(b.dataset.clip), until: b.dataset.end ? Number(b.dataset.end) : null };
+      this._renderModal();
       host.querySelector(".sheet")?.scrollIntoView({ block: "start" });
     }; });
     host.querySelectorAll("[data-ptz]").forEach((b) => {

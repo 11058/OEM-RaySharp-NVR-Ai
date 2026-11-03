@@ -96,3 +96,18 @@ def test_record_flag_forms():
     assert rec({"r": "SR"}) and not rec({"r": ""}) and rec(True) and not rec(False)
     assert not rec("") and rec("1")
     del sys, types
+
+
+def test_record_segments():
+    rt = events.record_event_type
+    assert rt({"record_type": 1, "new_record_type": "N"}) is None
+    assert rt({"record_type": 128, "new_record_type": "SN"}) == "smart"
+    assert rt({"record_type": 2, "new_record_type": "M"}) == "motion"
+    log = events.EventLog()
+    start = time.time() - 3600
+    assert log.add_record(1, "smart", start, start + 46)
+    assert not log.add_record(1, "smart", start, start + 46)  # next search
+    log.add_alarm({"channel": 3, "alarm_type": "person"})
+    assert not log.add_record(3, "smart", time.time() - 5, time.time())  # live alarm has it
+    ev = log.recent()[-1]
+    assert ev["history"] and ev["rec_end"] - ev["rec_start"] == 46

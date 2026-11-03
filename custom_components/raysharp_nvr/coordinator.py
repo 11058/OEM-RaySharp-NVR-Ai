@@ -40,6 +40,7 @@ from .const import (
     API_AI_SCHEDULE,
     API_AI_VHD_COUNT,
     API_AI_VHD_GET,
+    API_RECORD_SEARCH,
     API_ALARM_FD,
     API_ALARM_LCD,
     API_ALARM_PID,
@@ -166,6 +167,12 @@ AI_POLL_INTERVAL = 10.0
 # Bursts happen (hundreds of detections in a couple of minutes); cap the
 # per-poll fetch so one busy minute can't pull megabytes of JPEGs at once.
 AI_POLL_MAX_BATCH = 20
+# Event recordings on disk feed the journal: a day back at start, then
+# every few minutes.
+RECORD_HISTORY_HOURS = 24
+RECORD_HISTORY_INTERVAL = 300.0
+
+
 # Fallback for firmware that refuses SnapedObjects to non-admin accounts.
 VHD_BACKFILL_HOURS = 24
 VHD_MAX_PER_POLL = 40
@@ -607,6 +614,76 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:  # noqa: BLE001 — loop must survive anything
                 self._ai_last_error = str(err)
                 _LOGGER.debug("AI detection poll failed: %s", err)
+
+    def async_start_record_history(self) -> None:
+        """Fill the panel's journal from event recordings on the NVR's disk."""
+        if getattr(self, "_rec_task", None) is None or self._rec_task.done():
+            self._rec_task = self.config_entry.async_create_background_task(
+                self.hass, self._async_record_history_loop(), "raysharp_nvr record history"
+            )
+
+    async def _async_record_history_loop(self) -> None:
+        since = datetime.now() - timedelta(hours=RECORD_HISTORY_HOURS)
+        await asyncio.sleep(20)  # let the first refresh and Event Check settle
+        while True:
+            until = datetime.now()
+            try:
+                added = await self._async_record_history(since, until)
+                self._rec_last_error = None
+                if added:
+                    _LOGGER.debug("Record history: %d event segments added", added)
+                # Segments are written when they close: look back a while.
+                since = until - timedelta(minutes=30)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - keep trying
+                self._rec_last_error = str(err)
+            await asyncio.sleep(RECORD_HISTORY_INTERVAL)
+
+    async def _async_record_history(self, since: datetime, until: datetime) -> int:
+        from .events import get_event_log, record_event_type  # noqa: PLC0415
+
+        channels = [f"CH{n}" for n in sorted(self.channel_abilities)] or [
+            f"CH{channel_num_from_str(ch.get('channel', '') if isinstance(ch, dict) else '', i + 1)}"
+            for i, ch in enumerate(get_channel_list(self.data or {}))
+        ]
+        if not channels:
+            return 0
+        resp = await self.client.async_api_call(
+            API_RECORD_SEARCH,
+            {
+                "channel": channels,
+                "start_date": since.strftime("%m/%d/%Y"),
+                "start_time": since.strftime("%H:%M:%S"),
+                "end_date": until.strftime("%m/%d/%Y"),
+                "end_time": until.strftime("%H:%M:%S"),
+                "record_type": 4294967295,
+                "smart_region": [],
+                "enable_smart_search": 0,
+            },
+        )
+        log = get_event_log(self.hass)
+        added = 0
+        for group in self._extract_data(resp).get("record") or []:
+            for rec in group if isinstance(group, list) else [group]:
+                if not isinstance(rec, dict):
+                    continue
+                kind = record_event_type(rec)
+                if kind is None:
+                    continue
+                try:
+                    start = datetime.strptime(
+                        f"{rec['start_date']} {rec['start_time']}", "%m/%d/%Y %H:%M:%S"
+                    ).timestamp()
+                    end = datetime.strptime(
+                        f"{rec['end_date']} {rec['end_time']}", "%m/%d/%Y %H:%M:%S"
+                    ).timestamp()
+                except (KeyError, ValueError):
+                    continue
+                num = channel_num_from_str(str(rec.get("channel", "")), 0)
+                if num and log.add_record(num, kind, start, end):
+                    added += 1
+        return added
 
     async def _async_vhd_loop(self) -> bool:
         """Poll /API/AI/VhdLog/GetByIndex per channel by time window.
