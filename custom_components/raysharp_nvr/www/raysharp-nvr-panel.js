@@ -157,6 +157,7 @@ class RaySharpNvrPanel extends HTMLElement {
       });
       this._nvrs = res.nvrs || [];
       this._events = res.events || [];
+      this._lastEvent = res.last_event || null;
       this._error = "";
     } catch (e) { this._error = e.message || String(e); }
     this._render();
@@ -347,7 +348,8 @@ class RaySharpNvrPanel extends HTMLElement {
         <select data-opt="period" class="sel">${PERIODS.map(([p, l]) => `<option value="${p}" ${p === this._period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       <div class="tabs"><button class="tab ${this._filter ? "" : "on"}" data-do="filter" data-t="">все</button>${types.map((t) =>
         `<button class="tab ${this._filter === t ? "on" : ""}" data-do="filter" data-t="${esc(t)}">${esc(TYPE[t] || t)}</button>`).join("")}</div>
-      ${feed || '<div class="muted">За этот период событий нет</div>'}
+      ${feed || `<div class="muted">За этот период событий нет${this._lastEvent
+        ? `. Последнее — ${hhmm(this._lastEvent)}${this._period < 7 * 86400 ? ' <button class="act" data-do="week">показать за неделю</button>' : ""}` : ""}</div>`}
       ${list.length > (this._feedLimit || 100) ? '<button class="act more" data-do="more">Показать ещё</button>' : ""}`;
   }
 
@@ -363,6 +365,7 @@ class RaySharpNvrPanel extends HTMLElement {
       case "size": this._size = d.s; store.set("size", d.s); break;
       case "filter": this._filter = d.t; this._feedLimit = 100; break;
       case "more": this._feedLimit = (this._feedLimit || 100) + 100; break;
+      case "week": this._period = 7 * 86400; store.set("period", this._period); this._load(); return;
       case "ask": this._confirm = { entry: d.entry, action: d.a }; break;
       case "cancel": this._confirm = null; break;
       case "go": this._confirm = null;

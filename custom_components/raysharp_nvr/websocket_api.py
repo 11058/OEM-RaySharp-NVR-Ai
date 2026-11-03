@@ -168,6 +168,7 @@ def ws_overview(hass: HomeAssistant, connection, msg: dict) -> None:
         {
             "nvrs": [_nvr_view(hass, e, c) for e, c in _entries(hass)],
             "events": log.recent(msg["limit"], msg.get("since")),
+            "last_event": next((e["ts"] for e in log.recent(1)), None),
         },
     )
 
@@ -266,7 +267,9 @@ _CLIPS = f"{DOMAIN}_clips"
 
 # Ways RaySharp firmware has been seen to want the playback window: ISO time
 # with a Z that is either honoured (UTC) or ignored (NVR local), or compact.
-PLAYBACK_VARIANTS = ("iso-utc", "iso-local", "compact-utc", "compact-local")
+PLAYBACK_VARIANTS = (
+    "iso-local", "iso-utc", "iso-local-noz", "compact-local", "compact-utc",
+)
 _VARIANT = f"{DOMAIN}_playback_variant"
 
 
@@ -281,6 +284,9 @@ def playback_url(live: str, start: float, end: float, variant: str = "iso-local"
     if "/rtsp/streaming" not in live:
         return None
     fmt = "%Y-%m-%dT%H:%M:%SZ" if variant.startswith("iso") else "%Y%m%dT%H%M%SZ"
+    if variant.endswith("-noz"):
+        fmt = fmt.rstrip("Z")
+        variant = variant[: -len("-noz")]
     if variant.endswith("utc"):
         t0 = dt.datetime.fromtimestamp(start, dt.UTC).strftime(fmt)
         t1 = dt.datetime.fromtimestamp(end, dt.UTC).strftime(fmt)
@@ -509,8 +515,35 @@ async def ws_api(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], resp)
 
 
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/probe_playback",
+        vol.Required("camera"): str,
+        vol.Required("query"): str,
+        vol.Optional("profile", default="main"): vol.In(["main", "sub", "mobile"]),
+    }
+)
+@websocket_api.async_response
+async def ws_probe_playback(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Diagnostics: try a raw playback query against the camera's NVR.
+
+    `query` replaces everything after "/rtsp/" in the camera's own URL, e.g.
+    "playback?channel=6&subtype=0&starttime=...&endtime=...". Read-only.
+    """
+    cam = _raysharp_camera(hass, msg["camera"])
+    urls = cam.profile_urls() if cam is not None and hasattr(cam, "profile_urls") else {}
+    live = urls.get(msg["profile"], "")
+    if "/rtsp/" not in live:
+        connection.send_error(msg["id"], "no_stream", "Нет RTSP-адреса")
+        return
+    url = live.split("/rtsp/", 1)[0] + "/rtsp/" + msg["query"].lstrip("/")
+    why = await hass.async_add_executor_job(_probe, url)
+    connection.send_result(msg["id"], {"ok": not why, "why": why})
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
-                    ws_stream, ws_api):  # fmt: skip
+                    ws_stream, ws_api, ws_probe_playback):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
