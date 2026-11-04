@@ -319,8 +319,8 @@ def _probe(url: str, timeout: float = 12) -> str:
         return str(err).replace(url, "<url>")[:120] or type(err).__name__
 
 
-def _audio_codec(url: str, timeout: float = 10) -> str:
-    """Audio codec the source carries ("" when it has no audio track)."""
+def _codecs(url: str, timeout: float = 10) -> tuple[str, str]:
+    """(video, audio) codec names of the source; "" = no such track, "?" = unknown."""
     import av  # noqa: PLC0415
 
     try:
@@ -328,16 +328,18 @@ def _audio_codec(url: str, timeout: float = 10) -> str:
             url, options={"rtsp_transport": "tcp", "timeout": str(int(timeout * 1e6))},
             timeout=timeout,
         ) as box:
-            return box.streams.audio[0].codec_context.name if box.streams.audio else ""
+            v = box.streams.video[0].codec_context.name if box.streams.video else ""
+            a = box.streams.audio[0].codec_context.name if box.streams.audio else ""
+            return v, a
     except Exception:  # noqa: BLE001 - unknown is reported as such
-        return "?"
+        return "?", "?"
 
 
-async def _audio_of(hass: HomeAssistant, camera: str, profile: str, url: str) -> str:
-    cache: dict = hass.data.setdefault(f"{DOMAIN}_audio_codec", {})
+async def _codecs_of(hass: HomeAssistant, camera: str, profile: str, url: str) -> tuple[str, str]:
+    cache: dict = hass.data.setdefault(f"{DOMAIN}_codecs", {})
     key = (camera, profile)
-    if cache.get(key) in (None, "?"):
-        cache[key] = await hass.async_add_executor_job(_audio_codec, url)
+    if key not in cache or "?" in cache[key]:
+        cache[key] = await hass.async_add_executor_job(_codecs, url)
     return cache[key]
 
 
@@ -631,6 +633,7 @@ async def ws_probe_playback(hass: HomeAssistant, connection, msg: dict) -> None:
         vol.Optional("profile", default="main"): vol.In(["main", "sub", "mobile"]),
         vol.Optional("ts"): vol.Coerce(float),
         vol.Optional("until"): vol.Coerce(float),
+        vol.Optional("format", default="mp4"): vol.In(["mp4", "hls"]),
     }
 )
 @websocket_api.async_response
@@ -638,7 +641,12 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
     """Signed URL of an MP4 with sound (AAC) for the camera window: live when
     no `ts` is given, otherwise the recording around `ts` like raysharp_nvr/clip.
     HLS from HA's stream component drops the cameras' G.711 audio."""
-    from .av_view import new_token, signed_url  # noqa: PLC0415
+    from .av_view import hls_url, new_token, signed_url  # noqa: PLC0415
+
+    def _url(token: str) -> str:
+        if msg["format"] == "hls":
+            return hls_url(token)
+        return signed_url(hass, token, connection.refresh_token_id)
 
     cam = _raysharp_camera(hass, msg["camera"])
     if cam is None or not hasattr(cam, "profile_urls"):
@@ -650,11 +658,9 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         if not source:
             connection.send_error(msg["id"], "no_stream", "Такого потока у камеры нет")
             return
-        audio = await _audio_of(hass, msg["camera"], msg["profile"], source)
-        token = new_token(hass, source, None)
-        connection.send_result(msg["id"], {
-            "url": signed_url(hass, token, connection.refresh_token_id), "audio": audio,
-        })
+        vcodec, audio = await _codecs_of(hass, msg["camera"], msg["profile"], source)
+        token = new_token(hass, source, None, vcodec)
+        connection.send_result(msg["id"], {"url": _url(token), "audio": audio, "video": vcodec})
         return
     live = await cam.stream_source() or ""
     if "/rtsp/streaming" not in live:
@@ -673,20 +679,20 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         )  # fmt: skip
         return
     duration = (end or ts + CLIP_AFTER_S) - (ts - CLIP_BEFORE_S)
-    token = new_token(hass, url, duration)
-    audio = await _audio_of(hass, msg["camera"], "main", live)
+    vcodec, audio = await _codecs_of(hass, msg["camera"], "main", live)
+    token = new_token(hass, url, duration, vcodec)
     connection.send_result(msg["id"], {
-        "audio": audio,
-        "url": signed_url(hass, token, connection.refresh_token_id),
+        "audio": audio, "video": vcodec, "url": _url(token),
         "before": CLIP_BEFORE_S, "after": int(end - ts) if end else CLIP_AFTER_S,
     })
 
 
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
-    from .av_view import RaySharpAvView  # noqa: PLC0415
+    from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
 
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
                     ws_stream, ws_api, ws_probe_playback, ws_av):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
+    hass.http.register_view(RaySharpAvHlsView(hass))

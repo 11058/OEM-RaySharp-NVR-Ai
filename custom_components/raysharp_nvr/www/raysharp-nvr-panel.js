@@ -51,6 +51,14 @@ const store = {
   set(k, v) { try { localStorage.setItem(`raysharp_nvr_${k}`, String(v)); } catch (e) { /* private mode */ } },
 };
 
+// Safari and every iOS browser / the HA app (WebKit): no endless progressive
+// MP4, but native HLS. They get the integration's HLS-with-sound instead.
+const APPLE = (() => {
+  const ua = navigator.userAgent || "";
+  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Android/.test(ua)
+    || /iPad|iPhone|iPod/.test(ua);
+})();
+
 // ha-hls-player ships with HA's camera UI, which loads lazily; pull it in once.
 let playerReady;
 function ensurePlayer() {
@@ -503,7 +511,7 @@ class RaySharpNvrPanel extends HTMLElement {
     box.innerHTML = `<div class="noimg">${wait}</div>`;
     let res;
     try {
-      res = await this._hass.callWS({ type: "raysharp_nvr/av", ...msg });
+      res = await this._hass.callWS({ type: "raysharp_nvr/av", ...msg, format: APPLE ? "hls" : "mp4" });
     } catch (e) {
       if (!current()) return;
       if (e && e.code === "no_recording") { box.innerHTML = `<div class="noimg">${esc(e.message)}</div>`; return; }
