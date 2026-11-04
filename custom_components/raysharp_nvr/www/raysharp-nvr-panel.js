@@ -507,7 +507,7 @@ class RaySharpNvrPanel extends HTMLElement {
     } catch (e) {
       if (!current()) return;
       if (e && e.code === "no_recording") { box.innerHTML = `<div class="noimg">${esc(e.message)}</div>`; return; }
-      fallback(); return;
+      fallback(); this._avNote(box, `🔇 видео без звука: ${e.message || e.code || e}`); return;
     }
     if (!current()) return;
     const v = document.createElement("video");
@@ -517,9 +517,22 @@ class RaySharpNvrPanel extends HTMLElement {
       if (done || !current()) return;
       done = true;
       box.parentNode.querySelectorAll(".cliphint").forEach((n) => n.remove());
+      const why = v.error ? `код ${v.error.code}${v.error.message ? `, ${v.error.message}` : ""}` : "";
       fallback();
+      this._avNote(box, `🔇 видео без звука: браузер не открыл поток со звуком (${why})`);
     }, { once: true });
-    v.addEventListener("playing", () => { done = true; }, { once: true });
+    v.addEventListener("playing", () => {
+      done = true;
+      const a = res.audio;
+      const name = { pcm_alaw: "G.711A", pcm_mulaw: "G.711U", adpcm_g726: "G.726", aac: "AAC" }[a] || a;
+      this._avNote(box, a === "" ? "🔇 камера не передаёт звук — включите аудио в настройках канала на регистраторе"
+        : a === "?" ? "🔊 звук: формат не определился"
+        : `🔊 звук: ${name} → AAC${v.muted ? " — включён без звука, нажмите на громкость" : ""}`);
+      setTimeout(() => {
+        // Chrome counts decoded audio; nothing after a few seconds = silent track.
+        if (current() && v.webkitAudioDecodedByteCount === 0 && a) this._avNote(box, `🔇 звуковая дорожка ${name} есть, но пустая`);
+      }, 6000);
+    }, { once: true });
     v.src = this._hass.hassUrl ? this._hass.hassUrl(res.url) : res.url;
     box.innerHTML = ""; box.appendChild(v);
     if (res.before !== undefined) {
@@ -532,6 +545,13 @@ class RaySharpNvrPanel extends HTMLElement {
       // Autoplay with sound refused: play muted, the controls unmute it.
       if (e && e.name === "NotAllowedError") { v.muted = true; v.play().catch(() => {}); }
     }
+  }
+
+  _avNote(box, text) {
+    if (!box.isConnected) return;
+    let n = box.parentNode.querySelector(".avnote");
+    if (!n) { n = document.createElement("div"); n.className = "sub avnote"; box.after(n); }
+    n.textContent = text;
   }
 
   async _playProfile(box, ch, profile, key) {

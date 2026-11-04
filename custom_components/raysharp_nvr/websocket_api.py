@@ -319,6 +319,28 @@ def _probe(url: str, timeout: float = 12) -> str:
         return str(err).replace(url, "<url>")[:120] or type(err).__name__
 
 
+def _audio_codec(url: str, timeout: float = 10) -> str:
+    """Audio codec the source carries ("" when it has no audio track)."""
+    import av  # noqa: PLC0415
+
+    try:
+        with av.open(
+            url, options={"rtsp_transport": "tcp", "timeout": str(int(timeout * 1e6))},
+            timeout=timeout,
+        ) as box:
+            return box.streams.audio[0].codec_context.name if box.streams.audio else ""
+    except Exception:  # noqa: BLE001 - unknown is reported as such
+        return "?"
+
+
+async def _audio_of(hass: HomeAssistant, camera: str, profile: str, url: str) -> str:
+    cache: dict = hass.data.setdefault(f"{DOMAIN}_audio_codec", {})
+    key = (camera, profile)
+    if cache.get(key) in (None, "?"):
+        cache[key] = await hass.async_add_executor_job(_audio_codec, url)
+    return cache[key]
+
+
 def _has_video(url: str) -> bool:
     return _probe(url) == ""
 
@@ -628,8 +650,11 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         if not source:
             connection.send_error(msg["id"], "no_stream", "Такого потока у камеры нет")
             return
+        audio = await _audio_of(hass, msg["camera"], msg["profile"], source)
         token = new_token(hass, source, None)
-        connection.send_result(msg["id"], {"url": signed_url(hass, token, connection.refresh_token_id)})
+        connection.send_result(msg["id"], {
+            "url": signed_url(hass, token, connection.refresh_token_id), "audio": audio,
+        })
         return
     live = await cam.stream_source() or ""
     if "/rtsp/streaming" not in live:
@@ -649,7 +674,9 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         return
     duration = (end or ts + CLIP_AFTER_S) - (ts - CLIP_BEFORE_S)
     token = new_token(hass, url, duration)
+    audio = await _audio_of(hass, msg["camera"], "main", live)
     connection.send_result(msg["id"], {
+        "audio": audio,
         "url": signed_url(hass, token, connection.refresh_token_id),
         "before": CLIP_BEFORE_S, "after": int(end - ts) if end else CLIP_AFTER_S,
     })
