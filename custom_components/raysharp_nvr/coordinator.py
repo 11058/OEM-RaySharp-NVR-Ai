@@ -263,6 +263,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # from the outside.
         self._ec_polls = 0
         self.record_flags: dict[int, bool] = {}
+        self.nvr_offset_s: float | None = None  # NVR wall clock minus UTC
         self.snapshot_errors: dict[int, str] = {}
         self.channel_abilities: dict[int, list[str]] = {}
         self._ec_errors = 0
@@ -881,6 +882,14 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for entry in data.get("alarm_list") or []:
             if not isinstance(entry, dict):
                 continue
+            if entry.get("time"):
+                from .events import learn_offset, set_nvr_offset  # noqa: PLC0415
+
+                offset = learn_offset(entry["time"])
+                if offset is not None and offset != self.nvr_offset_s:
+                    _LOGGER.debug("NVR clock is UTC%+.1fh", offset / 3600)
+                    self.nvr_offset_s = offset
+                    set_nvr_offset(offset)
             for ch in entry.get("channel_alarm") or []:
                 if not isinstance(ch, dict):
                     continue

@@ -53,9 +53,59 @@ def parse_ts(value: Any) -> float | None:
     return when.timestamp()
 
 
+# RaySharp keeps detection times (AI StartTime/EndTime) as the NVR's wall
+# clock written as if it were UTC: 17:23 local in UTC+5 arrives as the epoch
+# of 17:23 UTC. Seen on NVR-167R V8.2.7: every history event sat 5 hours late
+# and its clip opened at the wrong hour. The coordinator learns the NVR's UTC
+# offset from the clock in Event Check; until then HA's own zone is assumed.
+_NVR_OFFSET: list[float | None] = [None]
+
+
+def set_nvr_offset(offset_s: float | None) -> None:
+    _NVR_OFFSET[0] = offset_s
+
+
+def nvr_offset() -> float:
+    if _NVR_OFFSET[0] is not None:
+        return _NVR_OFFSET[0]
+    return float(time.localtime().tm_gmtoff)
+
+
+def learn_offset(nvr_clock: str, now: float | None = None) -> float | None:
+    """'11/05/2026 18:59:25' (Event Check alarm_list time) -> UTC offset, s."""
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            wall = dt.datetime.strptime(str(nvr_clock).strip()[:19], fmt)
+        except ValueError:
+            continue
+        as_utc = wall.replace(tzinfo=dt.UTC).timestamp()
+        return round((as_utc - (now if now is not None else time.time())) / 900) * 900
+    return None
+
+
+def nvr_time(value: Any, offset: float | None = None) -> float | None:
+    """A detection time from the NVR -> real unix time."""
+    if value in (None, ""):
+        return None
+    off = nvr_offset() if offset is None else offset
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        text = str(value).replace("T", " ").replace("/", "-").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%m-%d-%Y %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                wall = dt.datetime.strptime(text[:19], fmt)
+            except ValueError:
+                continue
+            return wall.replace(tzinfo=dt.UTC).timestamp() - off
+        return parse_ts(value)
+    ts = ts / 1000 if ts > 1e11 else ts
+    return ts - off
+
+
 def is_recent(start_time: Any, max_age_s: int = RECENT_S) -> bool:
     """Was a detection taken within the last few minutes? Unknown = yes."""
-    ts = parse_ts(start_time)
+    ts = nvr_time(start_time)
     return ts is None or time.time() - ts <= max_age_s
 
 
@@ -199,11 +249,16 @@ class EventLog:
             return
         channel = data.get("channel", 0)
         snap_id = data.get("snap_id")
-        when = parse_ts(data.get("start_time"))
+        when = nvr_time(data.get("start_time"))
         now = time.time()
         history = when is not None and now - when > RECENT_S
 
         ev = self._by_snap(channel, snap_id)  # already known: backfill repeats
+        if ev is not None and history and ev.get("source") == "history" and abs(
+            ev.get("ts", 0) - when
+        ) > 60:
+            ev["ts"] = when  # stored before the NVR clock was understood
+            self.events.sort(key=lambda e: e.get("ts", 0))
         if ev is None and not history:
             ev = self._find(channel, kind, snap_id)
         if ev is None and history:
@@ -263,12 +318,19 @@ class EventLog:
         return rows[-limit:][::-1]
 
     def dump(self) -> dict[str, Any]:
-        return {"next_id": self._next_id, "events": self.events}
+        return {"next_id": self._next_id, "events": self.events, "clock": 2}
 
     def load(self, data: dict[str, Any] | None, pictures: dict[int, str]) -> None:
         if not data:
             return
         events = [e for e in data.get("events", []) if isinstance(e, dict) and "id" in e]
+        if data.get("clock", 1) < 2:
+            # Logs from before v1.4.8 took AI times at face value (NVR wall
+            # clock as UTC): move those back by the zone offset.
+            off = nvr_offset()
+            for e in events:
+                if e.get("source") == "history":
+                    e["ts"] = e.get("ts", 0) - off
         events.sort(key=lambda e: e.get("ts", 0))
         self.events = events[-MAX_EVENTS:]
         ids = {e["id"] for e in self.events}

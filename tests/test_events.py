@@ -77,7 +77,8 @@ def test_picture_cap():
 
 
 def test_is_recent():
-    now = time.time()
+    # AI times are the NVR wall clock written as UTC.
+    now = time.time() + events.nvr_offset()
     assert events.is_recent(now) and events.is_recent(now * 1000)
     assert not events.is_recent(now - 3600)
     assert events.is_recent("garbage") and events.is_recent(None)
@@ -146,3 +147,29 @@ def test_playback_variants_utc_first():
     start = text.index("PLAYBACK_VARIANTS = (")
     order = text[start : text.index(")", start)]
     assert order.split('"')[1] == "iso-utc"
+
+
+def test_nvr_clock_offset_and_ai_times():
+    ev = events
+    # Event Check said 18:59:25 when it was 13:59:25 UTC: UTC+5.
+    now = 1793887165.0  # 2026-11-05 13:59:25 UTC
+    assert ev.learn_offset("11/05/2026 18:59:25", now) == 5 * 3600
+    # AI StartTime 1793813011 = "22:23:31 UTC" = 17:23:31 local = 12:23:31 UTC.
+    assert ev.nvr_time(1793813011, 5 * 3600) == 1793813011 - 18000
+    assert ev.nvr_time("2026-11-04 17:23:31", 5 * 3600) == 1793813011 - 18000
+
+
+def test_old_history_moved_back_on_load():
+    ev = events
+    ev.set_nvr_offset(5 * 3600)
+    try:
+        log = ev.EventLog()
+        log.load({"next_id": 3, "events": [
+            {"id": 1, "ts": 1793813011.0, "channel": 1, "type": "person", "source": "history"},
+            {"id": 2, "ts": 1793813000.0, "channel": 1, "type": "motion", "source": "alarm"},
+        ]}, {})  # fmt: skip
+        by_id = {e["id"]: e["ts"] for e in log.events}
+        assert by_id == {1: 1793813011.0 - 18000, 2: 1793813000.0}
+        assert log.dump()["clock"] == 2
+    finally:
+        ev.set_nvr_offset(None)
