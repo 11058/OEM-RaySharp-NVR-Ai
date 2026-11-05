@@ -136,3 +136,13 @@ def test_nvr_wide_events_hidden():
     log.add_alarm({"channel": 0, "alarm_type": "motion"})
     log.add_alarm({"channel": 2, "alarm_type": "motion"})
     assert [e["channel"] for e in log.recent()] == [2]
+
+
+def test_playback_variants_utc_first():
+    from pathlib import Path
+
+    src = Path(__file__).parents[1] / "custom_components/raysharp_nvr/websocket_api.py"
+    text = src.read_text()
+    start = text.index("PLAYBACK_VARIANTS = (")
+    order = text[start : text.index(")", start)]
+    assert order.split('"')[1] == "iso-utc"

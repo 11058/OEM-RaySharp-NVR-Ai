@@ -265,15 +265,18 @@ CLIP_LIFETIME_S = 240
 _CLIPS = f"{DOMAIN}_clips"
 
 
-# Ways RaySharp firmware has been seen to want the playback window: ISO time
-# with a Z that is either honoured (UTC) or ignored (NVR local), or compact.
+# Ways RaySharp firmware has been seen to want the playback window. UTC with
+# a Z comes first: NVR-167R V8.2.7 honours the Z, and sending local time there
+# played a recording 5 hours off (Asia/Yekaterinburg) without any error, since
+# a continuously recording NVR has video for any hour. The probe only tells
+# "there is video", never "it is the right time", so the order matters.
 PLAYBACK_VARIANTS = (
-    "iso-local", "iso-utc", "iso-local-noz", "compact-local", "compact-utc",
+    "iso-utc", "compact-utc", "iso-local", "iso-local-noz", "compact-local",
 )
 _VARIANT = f"{DOMAIN}_playback_variant"
 
 
-def playback_url(live: str, start: float, end: float, variant: str = "iso-local") -> str | None:
+def playback_url(live: str, start: float, end: float, variant: str = "iso-utc") -> str | None:
     """Live RTSP URL of a channel -> the NVR's playback URL for a time window.
 
     RaySharp firmware serves recordings at /rtsp/playback with the same query
