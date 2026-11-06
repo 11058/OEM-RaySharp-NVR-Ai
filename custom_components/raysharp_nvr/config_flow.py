@@ -148,6 +148,50 @@ class RaySharpNVRConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Change the NVR's address, port, login or password (⋮ → Перенастроить)."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data = {**entry.data, **user_input}
+            if not user_input.get(CONF_PASSWORD):
+                data[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, "")  # keep the old one
+            client = RaySharpNVRClient(
+                host=data[CONF_HOST],
+                port=data[CONF_PORT],
+                username=data[CONF_USERNAME],
+                password=data[CONF_PASSWORD],
+            )
+            try:
+                await client.async_login()
+            except RaySharpNVRAuthError:
+                errors["base"] = "invalid_auth"
+            except RaySharpNVRConnectionError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected exception during reconfigure")
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(entry, data=data)
+            finally:
+                await client.async_close()
+        d = {**entry.data, **(user_input or {})}
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=d.get(CONF_HOST, "")): str,
+                    vol.Required(CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)): int,
+                    vol.Required(CONF_USERNAME, default=d.get(CONF_USERNAME, DEFAULT_USERNAME)): str,
+                    vol.Optional(CONF_PASSWORD, default=""): str,
+                }
+            ),
+            errors=errors,
+            description_placeholders={"host": str(entry.data.get(CONF_HOST, ""))},
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(
