@@ -115,18 +115,28 @@
         box.innerHTML = `<div class="placeholder">Камера ${esc(this._config.entity)} не найдена</div>`;
         return;
       }
-      const el = document.createElement("ha-camera-stream");
-      el.hass = this._hass; el.stateObj = st;
-      el.muted = true; el.controls = false; el.allowExoPlayer = true;
-      el.addEventListener("camera-capabilities-changed", (ev) => {
-        const caps = ev.detail && ev.detail.capabilities;
-        this._talk = !!(caps && caps.two_way_audio);
+      // Only WebRTC: ha-camera-stream would also open HLS, a second stream
+      // the door panel may refuse (it serves only a couple at once).
+      const webrtc = customElements.get("ha-web-rtc-player");
+      const el = document.createElement(webrtc ? "ha-web-rtc-player" : "ha-camera-stream");
+      el.hass = this._hass;
+      if (webrtc) { el.entityid = this._config.entity; el.autoplay = true; el.playsInline = true; el.fitMode = "contain"; }
+      else { el.stateObj = st; el.allowExoPlayer = true; }
+      el.muted = true; el.controls = false;
+      const caps = (c) => {
+        this._talk = !!(c && c.two_way_audio);
         this._mic.disabled = !this._talk || !window.isSecureContext;
         if (!this._talk) {
           this._noteText("Разговор с этой камерой недоступен: нужен Home Assistant 2026.11+, «Настройки → Система → Labs → Двусторонняя связь» и адрес панели в настройках интеграции RaySharp.");
         }
         this._show();
-      });
+      };
+      el.addEventListener("camera-capabilities-changed", (ev) => caps(ev.detail && ev.detail.capabilities));
+      el.addEventListener("microphone-changed", () => this._show());
+      if (webrtc) {
+        this._hass.callWS({ type: "camera/capabilities", entity_id: this._config.entity })
+          .then(caps, () => caps(null));
+      }
       box.innerHTML = ""; box.appendChild(el);
       this._stream = el;
       this._show();

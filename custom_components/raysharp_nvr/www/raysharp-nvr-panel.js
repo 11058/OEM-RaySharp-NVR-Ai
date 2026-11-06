@@ -542,10 +542,15 @@ class RaySharpNvrPanel extends HTMLElement {
       }
     };
     if (mode === "talk") {
-      const el = document.createElement("ha-camera-stream");
-      if (st && customElements.get("ha-camera-stream")) {
-        el.hass = this._hass; el.stateObj = st; el.muted = false; el.controls = true; el.allowExoPlayer = true;
+      // Only WebRTC (no parallel HLS): a door panel serves very few streams.
+      const webrtc = customElements.get("ha-web-rtc-player");
+      const el = document.createElement(webrtc ? "ha-web-rtc-player" : "ha-camera-stream");
+      if (st && (webrtc || customElements.get("ha-camera-stream"))) {
+        el.hass = this._hass; el.muted = false; el.controls = true;
+        if (webrtc) { el.entityid = ch.camera; el.autoplay = true; el.playsInline = true; }
+        else { el.stateObj = st; el.allowExoPlayer = true; }
         live.innerHTML = ""; live.appendChild(el); this._stream = el;
+        el.addEventListener("microphone-changed", () => show());
       }
       // HA 2026.11 keeps the talk button in its own camera dialog; the player
       // only exposes toggleMicrophone(). Offer both: talk here, or HA's dialog
@@ -570,10 +575,11 @@ class RaySharpNvrPanel extends HTMLElement {
         micBtn.classList.toggle("on", on);
         if (secure) micState.textContent = on ? "● вас слышно у панели" : "микрофон выключен";
       };
-      el.addEventListener("camera-capabilities-changed", (ev) => {
-        const ok = ev.detail && ev.detail.capabilities && ev.detail.capabilities.two_way_audio;
-        if (!ok && secure) { micBtn.disabled = true; micState.textContent = "HA не разрешил разговор с этой камерой: включите «Настройки → Система → Labs → Двусторонняя связь»"; }
-      });
+      const caps = (c) => {
+        if (!(c && c.two_way_audio) && secure) { micBtn.disabled = true; micState.textContent = "HA не разрешил разговор с этой камерой: включите «Настройки → Система → Labs → Двусторонняя связь»"; }
+      };
+      el.addEventListener("camera-capabilities-changed", (ev) => caps(ev.detail && ev.detail.capabilities));
+      if (webrtc) this._hass.callWS({ type: "camera/capabilities", entity_id: ch.camera }).then(caps, () => {});
       micBtn.onclick = async (ev) => {
         ev.stopPropagation();
         micBtn.disabled = true;
