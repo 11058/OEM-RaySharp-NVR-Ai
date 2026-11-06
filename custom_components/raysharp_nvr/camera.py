@@ -9,6 +9,11 @@ from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
+
+try:  # HA 2026.11+: two-way audio (talk button) over WebRTC/go2rtc
+    from homeassistant.components.camera import CameraEntityCapabilities
+except ImportError:  # older HA
+    CameraEntityCapabilities = None
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -270,6 +275,28 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
     def available(self) -> bool:
         """Return whether the camera is available."""
         return self.coordinator.last_update_success and self.is_streaming
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if CameraEntityCapabilities is not None:
+            self.hass.async_create_background_task(
+                self._async_detect_talk(), f"raysharp_nvr talk probe {self.entity_id}"
+            )
+
+    async def _async_detect_talk(self) -> None:
+        """Offer HA's talk button only when the NVR really lists an audio
+        back-channel on the stream go2rtc will use (DESCRIBE, read-only)."""
+        from .const import DOMAIN  # noqa: PLC0415
+        from .talk_probe import probe  # noqa: PLC0415
+
+        url = await self.stream_source()
+        if not url or not url.startswith("rtsp://"):
+            return
+        result = await probe(url)
+        self.hass.data.setdefault(f"{DOMAIN}_talk", {})[self.entity_id] = result
+        if result.get("backchannel"):
+            self._attr_camera_entity_capabilities = CameraEntityCapabilities(two_way_audio=True)
+            await self.async_refresh_providers()
 
     async def stream_source(self) -> str | None:
         """Return the RTSP stream source.

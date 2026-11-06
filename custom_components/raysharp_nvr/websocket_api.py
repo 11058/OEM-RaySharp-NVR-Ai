@@ -107,6 +107,7 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
                 "active": active,
                 "motion_switch": _ent(reg, "switch", f"{mac}_ch{num}_motion_alarm"),
                 "streams": _profiles(hass, cam),
+                "talk": bool((hass.data.get(f"{DOMAIN}_talk", {}).get(cam) or {}).get("backchannel")),
                 "ptz": any(
                     "ptz" in a.lower() for a in getattr(coord, "channel_abilities", {}).get(num, [])
                 ),

@@ -494,8 +494,10 @@ class RaySharpNvrPanel extends HTMLElement {
     const modeTabs = `<div class="tabs modes">
         <button class="tab ${mode === "live" ? "on" : ""}" data-mode="live">● Эфир</button>
         <button class="tab ${mode === "archive" ? "on" : ""}" data-mode="archive">🕘 Архив</button>
+        ${ch.talk ? `<button class="tab ${mode === "talk" ? "on" : ""}" data-mode="talk" title="Двусторонняя связь через Home Assistant (WebRTC)">🎙 Разговор</button>` : ""}
         ${mode === "clip" ? `<span class="chip">запись события ${hhmm(this._open.clip)}</span>` : ""}</div>`;
-    const streamTabs = mode === "live"
+    const streamTabs = mode === "talk" ? '<span class="sub">поток выбирает Home Assistant (WebRTC)</span>'
+      : mode === "live"
       ? profiles.map(([p, l]) => `<button class="tab ${p === profile ? "on" : ""}" data-prof="${p}">${l}</button>`).join("")
       : recProfiles.map(([p, l]) => `<button class="tab ${p === recProfile ? "on" : ""}" data-rprof="${p}">${l}</button>`).join("");
     host.innerHTML = `<div class="overlay" data-do="close-bg"><div class="sheet">
@@ -520,7 +522,23 @@ class RaySharpNvrPanel extends HTMLElement {
         live.innerHTML = ""; live.appendChild(el); this._stream = el;
       }
     };
-    if (mode === "archive") {
+    if (mode === "talk") {
+      // HA 2026.11 draws the talk button itself on its WebRTC player when the
+      // camera declares two-way audio, Labs → «Двусторонняя связь» is on and
+      // the page is opened over HTTPS (the browser's microphone rule).
+      if (st && customElements.get("ha-camera-stream")) {
+        const el = document.createElement("ha-camera-stream");
+        el.hass = this._hass; el.stateObj = st; el.muted = false; el.controls = true; el.allowExoPlayer = true;
+        live.innerHTML = ""; live.appendChild(el); this._stream = el;
+      }
+      const tips = [];
+      if (location.protocol !== "https:") tips.push("страница открыта по http — браузер не даст микрофон, откройте HA по https");
+      tips.push("кнопка микрофона появляется на видео, когда в «Настройки → Система → Labs» включена «Двусторонняя связь»");
+      const note = document.createElement("div");
+      note.className = location.protocol !== "https:" ? "warnbar" : "sub";
+      note.textContent = "🎙 " + tips.join("; ") + ".";
+      live.after(note);
+    } else if (mode === "archive") {
       this._renderTimeline();
       if (a && a.play) {
         const t = a.play;
