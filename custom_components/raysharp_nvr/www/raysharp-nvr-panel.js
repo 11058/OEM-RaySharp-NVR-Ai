@@ -199,7 +199,26 @@ class RaySharpNvrPanel extends HTMLElement {
       this._lastEvent = res.last_event || null;
       this._error = "";
     } catch (e) { this._error = e.message || String(e); }
+    this._deepLink();
     this._render();
+  }
+
+  // /video?camera=camera.ch1_cam01&mode=talk opens that camera straight away
+  // (live | talk | archive): the "Answer" button of a doorbell notification.
+  _deepLink() {
+    let q;
+    try { q = new URLSearchParams(location.search); } catch (e) { return; }
+    const cam = q.get("camera");
+    if (!cam || this._linked === location.search) return;
+    for (const n of this._nvrs) {
+      const ch = n.channels.find((c) => c.camera === cam);
+      if (!ch) continue;
+      this._linked = location.search;
+      const mode = ["live", "talk", "archive"].includes(q.get("mode")) ? q.get("mode") : "live";
+      this._open = { entry: n.entry_id, num: ch.num, clip: null, until: null, mode: mode === "talk" && !ch.talk ? "live" : mode };
+      this._renderModal();
+      return;
+    }
   }
 
   async _act(msg, key) {
