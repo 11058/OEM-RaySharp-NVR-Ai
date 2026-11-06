@@ -677,11 +677,13 @@ const STYLE = `
   .feed h2 { margin: 0; }
   .feed .hrow { margin-bottom: 8px; }
   .tabs { display:flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-  .layout { display:grid; grid-template-columns: 1fr 320px; gap: 12px; align-items: start; }
+  .layout { display:grid; grid-template-columns: 1fr clamp(320px, 20%, 480px); gap: 12px; align-items: start; }
   .grid { display:grid; gap: 8px; }
-  .grid.s { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
-  .grid.m { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-  .grid.l { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
+  /* At least the chosen tile size, and at most 6 / 4 / 3 columns, so tiles
+     grow with the screen instead of leaving it empty. */
+  .grid.s { grid-template-columns: repeat(auto-fill, minmax(max(180px, calc((100% - 5 * 8px) / 6)), 1fr)); }
+  .grid.m { grid-template-columns: repeat(auto-fill, minmax(max(260px, calc((100% - 3 * 8px) / 4)), 1fr)); }
+  .grid.l { grid-template-columns: repeat(auto-fill, minmax(max(420px, calc((100% - 2 * 8px) / 3)), 1fr)); }
   .tile { padding: 0; border: 2px solid transparent; border-radius: 10px; overflow: hidden; cursor: pointer;
     background: var(--card-background-color); color: var(--primary-text-color); text-align: left; }
   .tile.alert { border-color: var(--error-color, #c62828); box-shadow: 0 0 0 3px color-mix(in srgb, var(--error-color, #c62828) 30%, transparent); }
