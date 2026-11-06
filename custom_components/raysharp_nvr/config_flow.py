@@ -230,6 +230,21 @@ class RaySharpNVROptionsFlow(OptionsFlow):
                         CONF_TALK_PASSWORD,
                         default=self._config_entry.options.get(CONF_TALK_PASSWORD, ""),
                     ): str,
+                    # Intercom: phones to ring (notify services, comma separated;
+                    # empty = every phone with the HA app), the iOS sound, the
+                    # dashboard a ring opens.
+                    vol.Optional(
+                        "intercom_notify",
+                        default=self._config_entry.options.get("intercom_notify", ""),
+                    ): str,
+                    vol.Optional(
+                        "intercom_sound",
+                        default=self._config_entry.options.get("intercom_sound", "default"),
+                    ): str,
+                    vol.Optional(
+                        "intercom_dashboard",
+                        default=self._config_entry.options.get("intercom_dashboard", "/raysharp-doorbell"),
+                    ): str,
                 }
             ),
         )

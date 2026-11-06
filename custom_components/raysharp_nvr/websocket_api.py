@@ -845,12 +845,128 @@ async def ws_talk_probe(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], result)
 
 
+def _client(connection, msg: dict) -> dict[str, Any]:
+    user = getattr(connection, "user", None)
+    return {
+        "id": str(msg.get("client") or "")[:64],
+        "user": (user.name if user else "") or "",
+        "label": str(msg.get("label") or "")[:60],
+    }
+
+
+def _intercom(hass: HomeAssistant, key: str | None):
+    from .intercom import intercoms  # noqa: PLC0415
+
+    ics = intercoms(hass)
+    if key:
+        return ics.get(key)
+    return next(iter(ics.values()), None)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/intercom/subscribe",
+        vol.Optional("client", default=""): str,
+    }
+)
+@callback
+def ws_intercom_subscribe(hass: HomeAssistant, connection, msg: dict) -> None:
+    """State of every intercom now and on each change. When the socket of the
+    client that answered closes, the call ends after a short grace."""
+    from .intercom import intercoms, listen_all  # noqa: PLC0415
+
+    @callback
+    def _send(view: dict) -> None:
+        connection.send_message(websocket_api.event_message(msg["id"], {"intercom": view}))
+
+    unsubs = [listen_all(hass, _send)]
+
+    @callback
+    def _unsub() -> None:
+        for u in unsubs:
+            u()
+        if msg.get("client"):
+            for ic in intercoms(hass).values():
+                ic.detached(msg["client"])
+
+    connection.subscriptions[msg["id"]] = _unsub
+    connection.send_result(msg["id"], {"intercoms": [ic.view() for ic in intercoms(hass).values()]})
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/intercom/state"})
+@callback
+def ws_intercom_state(hass: HomeAssistant, connection, msg: dict) -> None:
+    from .intercom import intercoms  # noqa: PLC0415
+
+    connection.send_result(msg["id"], {"intercoms": [ic.view() for ic in intercoms(hass).values()]})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/intercom/answer",
+        vol.Optional("key"): str,
+        vol.Required("client"): str,
+        vol.Optional("label", default=""): str,
+    }
+)
+@callback
+def ws_intercom_answer(hass: HomeAssistant, connection, msg: dict) -> None:
+    from .intercom import BusyError  # noqa: PLC0415
+
+    ic = _intercom(hass, msg.get("key"))
+    if ic is None:
+        connection.send_error(msg["id"], "not_found", "Домофон не настроен")
+        return
+    try:
+        connection.send_result(msg["id"], ic.answer(_client(connection, msg)))
+    except BusyError as err:
+        who = err.who or {}
+        connection.send_error(
+            msg["id"], "busy",
+            f"Уже ответили: {who.get('user') or '?'}{' · ' + who['label'] if who.get('label') else ''}",
+        )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/intercom/hangup",
+        vol.Optional("key"): str,
+        vol.Optional("client", default=""): str,
+        vol.Optional("force", default=False): bool,
+    }
+)
+@callback
+def ws_intercom_hangup(hass: HomeAssistant, connection, msg: dict) -> None:
+    ic = _intercom(hass, msg.get("key"))
+    if ic is None:
+        connection.send_error(msg["id"], "not_found", "Домофон не настроен")
+        return
+    connection.send_result(msg["id"], ic.hangup(msg["client"], force=msg["force"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/intercom/test_ring", vol.Optional("key"): str}
+)
+@callback
+def ws_intercom_test_ring(hass: HomeAssistant, connection, msg: dict) -> None:
+    """A ring as if the button was pressed: to try phones and screens."""
+    ic = _intercom(hass, msg.get("key"))
+    if ic is None:
+        connection.send_error(msg["id"], "not_found", "Домофон не настроен")
+        return
+    ic.ring()
+    connection.send_result(msg["id"], ic.view())
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
 
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
-                    ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe):  # fmt: skip
+                    ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe,
+                    ws_intercom_subscribe, ws_intercom_state, ws_intercom_answer, ws_intercom_hangup,
+                    ws_intercom_test_ring):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))

@@ -635,6 +635,17 @@ async def async_setup_entry(
         "faces": faces_sensor,
     }
 
+    # The door panel as an intercom (only when the options name one).
+    from homeassistant.helpers.device_registry import DeviceInfo  # noqa: PLC0415
+
+    from .intercom import IntercomSensor, setup_intercom  # noqa: PLC0415
+
+    ic = setup_intercom(hass, entry, coordinator, mac)
+    if ic is not None:
+        entities.append(  # type: ignore[arg-type]
+            IntercomSensor(ic, DeviceInfo(identifiers={(DOMAIN, f"{mac}_ch{ic.channel}")}))
+        )
+
     async_add_entities(entities)
 
 

@@ -44,7 +44,10 @@
           "talk_channel": "Door panel channel for talk (0 = off)",
           "talk_host": "Door panel address (talk and live video straight from it)",
           "talk_username": "Door panel login (empty = the NVR's)",
-          "talk_password": "Door panel password (empty = the NVR's)"
+          "talk_password": "Door panel password (empty = the NVR's)",
+          "intercom_notify": "Intercom: phones to ring (notify services, comma separated; empty = every phone with the HA app)",
+          "intercom_sound": "Intercom: iOS ring sound (e.g. default, Doorbell.caf)",
+          "intercom_dashboard": "Intercom: dashboard a ring opens"
         }
       }
     }
