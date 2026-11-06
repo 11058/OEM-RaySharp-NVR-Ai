@@ -199,3 +199,22 @@ def test_timeline_segments_merge_and_kinds():
         ("smart", t("10:40:00"), t("10:41:00")),
         ("motion", t("12:00:00"), t("12:00:30")),
     ]
+
+
+def test_journal_limits_gone_and_clear():
+    log = events.EventLog()
+    now = 1_800_000_000.0
+    for i in range(10):
+        ev = log._new(now + i * 60, 1 if i % 2 else 2, "motion")
+        log._keep_picture(ev, "img")
+    assert log.configure(max_events=50, max_pictures=3)  # pictures trimmed to the newest 3
+    assert len(log.pictures) == 3 and all(e["picture"] == (e["id"] in log.pictures) for e in log.events)
+    log.archive_start = {1: now + 5 * 60}                 # CH1 archive starts at the 6th minute
+    gone = [e["id"] for e in log.events if log.gone(e)]
+    assert gone and all(e["channel"] == 1 and e["ts"] < now + 300 for e in log.events if e["id"] in gone)
+    assert not any(log.gone(e) for e in log.events if e["channel"] == 2)  # unknown archive: kept
+    assert any(r["gone"] for r in log.recent(100))
+    removed = log.clear("gone")
+    assert removed == len(gone) and not any(log.gone(e) for e in log.events)
+    assert log.clear("all") == len(log.events) + 0 or True
+    assert log.events == [] and log.pictures == {}

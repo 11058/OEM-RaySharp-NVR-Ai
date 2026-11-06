@@ -1407,6 +1407,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # HA; snapshot ids are de-duplicated, so nothing doubles up where the push
     # path does work.
     coordinator.async_start_ai_poll_loop()
+    # Journal limits from the options (shared log: the largest wins).
+    from .events import MAX_EVENTS, MAX_PICTURES, get_event_log  # noqa: PLC0415
+
+    _log = get_event_log(hass)
+    if _log.configure(
+        int(entry.options.get("journal_max_events") or MAX_EVENTS),
+        int(entry.options.get("journal_max_pictures") or MAX_PICTURES),
+    ) and _log.on_change:
+        _log.on_change()
     coordinator.async_start_record_history()
     entry.async_on_unload(coordinator.async_stop_ai_poll_loop)
 

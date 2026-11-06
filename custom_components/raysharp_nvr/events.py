@@ -163,6 +163,11 @@ class EventLog:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []  # oldest first
         self.pictures: dict[int, str] = {}
+        # Limits (options); the NVR's archive start per channel: events older
+        # than it have no recording any more.
+        self.max_events = MAX_EVENTS
+        self.max_pictures = MAX_PICTURES
+        self.archive_start: dict[int, float] = {}
         self._next_id = 1
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         # Persistence hooks, set by the HA wrapper.
@@ -195,7 +200,7 @@ class EventLog:
         self._next_id += 1
         keys = [e["ts"] for e in self.events]
         self.events.insert(bisect.bisect_right(keys, ts), ev)
-        while len(self.events) > MAX_EVENTS:
+        while len(self.events) > self.max_events:
             self._drop_picture(self.events.pop(0))
         return ev
 
@@ -209,10 +214,10 @@ class EventLog:
         ev["picture"] = True
         if self.on_picture:
             self.on_picture(ev["id"], image)
-        if len(self.pictures) > MAX_PICTURES:
+        if len(self.pictures) > self.max_pictures:
             # Drop pictures of the oldest events first.
             for old in self.events:
-                if len(self.pictures) <= MAX_PICTURES:
+                if len(self.pictures) <= self.max_pictures:
                     break
                 if old["id"] in self.pictures and old is not ev:
                     self._drop_picture(old)
@@ -337,14 +342,59 @@ class EventLog:
         ev = self._new(time.time(), data.get("channel", 0), "doorbell", source="doorbell")
         self._notify(ev)
 
+    # ── limits, archive, clearing ─────────────────────────────────────────
+    def configure(self, max_events: int, max_pictures: int) -> bool:
+        """Apply new limits; trims at once. True if anything was dropped."""
+        self.max_events = max(50, int(max_events))
+        self.max_pictures = max(0, int(max_pictures))
+        changed = False
+        while len(self.events) > self.max_events:
+            self._drop_picture(self.events.pop(0))
+            changed = True
+        if len(self.pictures) > self.max_pictures:
+            for old in self.events:
+                if len(self.pictures) <= self.max_pictures:
+                    break
+                if old["id"] in self.pictures:
+                    self._drop_picture(old)
+                    changed = True
+        return changed
+
+    def gone(self, ev: dict[str, Any]) -> bool:
+        """The NVR no longer has a recording of this event (archive overwritten
+        or the disk formatted). Unknown archive = not gone."""
+        start = self.archive_start.get(ev.get("channel"))
+        if start is None:
+            return False
+        return (ev.get("rec_end") or ev.get("last") or ev["ts"]) < start
+
+    def remove(self, keep: Callable[[dict[str, Any]], bool]) -> int:
+        before = len(self.events)
+        kept = []
+        for ev in self.events:
+            if keep(ev):
+                kept.append(ev)
+            else:
+                self._drop_picture(ev)
+        self.events = kept
+        removed = before - len(kept)
+        if removed and self.on_change:
+            self.on_change()
+        return removed
+
+    def clear(self, mode: str = "all") -> int:
+        if mode == "gone":
+            return self.remove(lambda ev: not self.gone(ev))
+        return self.remove(lambda ev: False)
+
     # ── outputs ───────────────────────────────────────────────────────────
     def recent(self, limit: int = 100, since: float | None = None) -> list[dict[str, Any]]:
-        """Newest first; `since` cuts by event time."""
+        """Newest first; `since` cuts by event time. `gone`: no recording left."""
         start = 0
         if since is not None:
             start = bisect.bisect_left([e["ts"] for e in self.events], since)
         rows = [e for e in self.events[start:] if e["channel"] or e["type"] == "doorbell"]
-        return rows[-limit:][::-1]
+        return [{**e, "gone": self.gone(e)} for e in rows[-limit:][::-1]]
 
     def dump(self) -> dict[str, Any]:
         return {"next_id": self._next_id, "events": self.events, "clock": 2}
@@ -361,7 +411,7 @@ class EventLog:
                 if e.get("source") == "history":
                     e["ts"] = e.get("ts", 0) - off
         events.sort(key=lambda e: e.get("ts", 0))
-        self.events = events[-MAX_EVENTS:]
+        self.events = events[-self.max_events:]
         ids = {e["id"] for e in self.events}
         self.pictures = {k: v for k, v in pictures.items() if k in ids}
         for e in self.events:

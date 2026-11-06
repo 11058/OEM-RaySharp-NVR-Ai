@@ -197,6 +197,7 @@ class RaySharpNvrPanel extends HTMLElement {
       this._nvrs = res.nvrs || [];
       this._events = res.events || [];
       this._lastEvent = res.last_event || null;
+      this._journal = res.journal || null;
       this._error = "";
     } catch (e) { this._error = e.message || String(e); }
     this._deepLink();
@@ -421,10 +422,12 @@ class RaySharpNvrPanel extends HTMLElement {
     const feed = list.slice(0, this._feedLimit || 100).map((e) => {
       const pic = e.picture ? this._pics.get(e.id) : null;
       if (e.picture && !this._pics.has(e.id)) this._picture(e.id);
-      return `<button class="ev" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${e.ts}" data-end="${e.rec_end || ""}">
+      // No recording left (archive overwritten, disk formatted): open the camera, not a clip.
+      const ts = e.gone ? "" : e.ts;
+      return `<button class="ev ${e.gone ? "gone" : ""}" data-do="open" data-entry="${esc(n.entry_id)}" data-num="${e.channel}" data-ts="${ts}" data-end="${e.gone ? "" : e.rec_end || ""}">
         ${pic ? `<img src="${pic}" alt="">` : `<div class="evicon">${esc((TYPE[e.type] || "?").slice(0, 1))}</div>`}
         <div><b>${esc(TYPE[e.type] || e.type)}</b>${e.detail ? ` <span class="plate">${esc(e.detail)}</span>` : ""}
-          <div class="sub">${esc(nameOf[e.channel] || `CH${e.channel}`)} · ${ago(e.ts)}</div></div></button>`;
+          <div class="sub">${esc(nameOf[e.channel] || `CH${e.channel}`)} · ${ago(e.ts)}${e.gone ? ' · <span class="warn">запись удалена</span>' : ""}</div></div></button>`;
     }).join("");
     return `<div class="hrow"><h2>События</h2><span class="grow"></span>
         <select data-opt="period" class="sel">${PERIODS.map(([p, l]) => `<option value="${p}" ${p === this._period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
@@ -432,7 +435,26 @@ class RaySharpNvrPanel extends HTMLElement {
         `<button class="tab ${this._filter === t ? "on" : ""}" data-do="filter" data-t="${esc(t)}">${esc(TYPE[t] || t)}</button>`).join("")}</div>
       ${feed || `<div class="muted">За этот период событий нет${this._lastEvent
         ? `. Последнее — ${hhmm(this._lastEvent)}${this._period < 7 * 86400 ? ' <button class="act" data-do="week">показать за неделю</button>' : ""}` : ""}</div>`}
-      ${list.length > (this._feedLimit || 100) ? '<button class="act more" data-do="more">Показать ещё</button>' : ""}`;
+      ${list.length > (this._feedLimit || 100) ? '<button class="act more" data-do="more">Показать ещё</button>' : ""}
+      ${this._journalBar()}`;
+  }
+
+  // Journal size, limits and clearing (admin).
+  _journalBar() {
+    const j = this._journal;
+    if (!j) return "";
+    const ask = this._confirm && this._confirm.journal;
+    const what = ask === "all" ? `все ${j.events} событий и ${j.pictures} снимков` : `${j.gone} событий без записи`;
+    const btns = !this._admin ? "" : ask
+      ? `<span class="sub">Удалить ${what}?</span>
+         <button class="act primary" data-do="jclear" data-m="${ask}">Да</button><button class="act" data-do="cancel">Нет</button>`
+      : `${j.gone ? `<button class="act" data-do="jask" data-m="gone">Убрать события без записи (${j.gone})</button>` : ""}
+         <button class="act" data-do="jask" data-m="all">Очистить журнал</button>`;
+    return `<div class="journal sub">
+      <div>Журнал в Home Assistant: ${j.events} из ${j.max_events} событий, ${j.pictures} из ${j.max_pictures} снимков${
+        j.archive_from ? ` · архив регистратора с ${hhmm(j.archive_from)}` : ""}${j.gone ? ` · без записи: ${j.gone}` : ""}.
+        Пределы — в настройках интеграции.</div>
+      <div class="acts">${btns}</div></div>`;
   }
 
   _onClick(ev) {
@@ -450,6 +472,12 @@ class RaySharpNvrPanel extends HTMLElement {
       case "week": this._period = 7 * 86400; store.set("period", this._period); this._load(); return;
       case "ask": this._confirm = { entry: d.entry, action: d.a }; break;
       case "cancel": this._confirm = null; break;
+      case "jask": this._confirm = { journal: d.m }; break;
+      case "jclear":
+        this._confirm = null;
+        this._hass.callWS({ type: "raysharp_nvr/journal_clear", mode: d.m })
+          .then(() => { this._pics.clear(); this._load(); }, (e) => { this._error = e.message || String(e); this._render(); });
+        return;
       case "go": this._confirm = null;
         this._act({ type: "raysharp_nvr/action", entry_id: d.entry, action: d.a }, d.a); return;
       default: return;
@@ -1038,6 +1066,10 @@ class RaySharpNvrPanel extends HTMLElement {
       <div class="evrow">${evs.map((e) => {
         const pic = this._pics.get(e.id);
         const on = this._open.clip === e.ts;
+        if (e.gone) {
+          return `<div class="evc gone">${pic ? `<img src="${pic}" alt="">` : `<div class="noimg sm">—</div>`}
+          <div class="sub">${esc(TYPE[e.type] || e.type)} · ${hhmm(e.ts)} · <span class="warn">запись удалена</span></div></div>`;
+        }
         return `<button class="evc ${on ? "on" : ""}" data-clip="${e.ts}" data-end="${e.rec_end || ""}">${pic ? `<img src="${pic}" alt="">` : `<div class="noimg sm">▶</div>`}
           <div class="sub">▶ ${esc(TYPE[e.type] || e.type)}${e.detail ? ` ${esc(e.detail)}` : ""} · ${hhmm(e.ts)}</div></button>`;
       }).join("") || '<span class="sub">нет</span>'}</div>`;
@@ -1132,6 +1164,9 @@ const STYLE = `
   .ovl { position: absolute; inset: 0; pointer-events: none; }
   .tile { display: block; }
   .prof { margin-bottom: 8px; align-items: center; }
+  .ev.gone, .evc.gone { opacity: .7; }
+  .journal { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--divider-color); }
+  .journal .acts { display:flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
   .talkbar { display:flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
   .talkbar .act { font-size: 15px; padding: 8px 14px; }
   .talkbar .act.on { background: var(--error-color, #c62828); border-color: var(--error-color, #c62828); color: #fff; }

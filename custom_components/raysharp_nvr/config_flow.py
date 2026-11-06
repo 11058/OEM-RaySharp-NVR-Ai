@@ -233,6 +233,20 @@ class RaySharpNVROptionsFlow(OptionsFlow):
                     # Intercom: phones to ring (notify services, comma separated;
                     # empty = every phone with the HA app), the iOS sound, the
                     # dashboard a ring opens.
+                    # Journal: how many events and pictures HA keeps; "nvr" also
+                    # drops events whose recording the NVR no longer has.
+                    vol.Optional(
+                        "journal_mode",
+                        default=self._config_entry.options.get("journal_mode", "count"),
+                    ): vol.In(["count", "nvr"]),
+                    vol.Optional(
+                        "journal_max_events",
+                        default=int(self._config_entry.options.get("journal_max_events") or 3000),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=50, max=50000)),
+                    vol.Optional(
+                        "journal_max_pictures",
+                        default=int(self._config_entry.options.get("journal_max_pictures") or 200),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=5000)),
                     vol.Optional(
                         "intercom_notify",
                         default=self._config_entry.options.get("intercom_notify", ""),

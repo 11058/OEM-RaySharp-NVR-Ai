@@ -622,6 +622,71 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._rec_task = self.config_entry.async_create_background_task(
                 self.hass, self._async_record_history_loop(), "raysharp_nvr record history"
             )
+        if getattr(self, "_arch_task", None) is None or self._arch_task.done():
+            self._arch_task = self.config_entry.async_create_background_task(
+                self.hass, self._async_archive_loop(), "raysharp_nvr archive bounds"
+            )
+
+    async def _async_archive_loop(self) -> None:
+        """Where the NVR's archive starts, per channel, once an hour: events
+        older than that have no video any more (overwritten, disk formatted).
+        In the "nvr" journal mode those events leave the journal too."""
+        await asyncio.sleep(60)
+        while True:
+            try:
+                await self._async_archive_bounds()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - keep trying
+                _LOGGER.debug("Archive bounds failed: %s", err)
+            await asyncio.sleep(3600)
+
+    async def _async_archive_bounds(self) -> None:
+        from .events import get_event_log  # noqa: PLC0415
+
+        log = get_event_log(self.hass)
+        channels = sorted(self.channel_abilities) or sorted(
+            {e["channel"] for e in log.events if isinstance(e.get("channel"), int) and e["channel"]}
+        )
+        if not channels:
+            return
+        now = datetime.now()
+        oldest = min((e["ts"] for e in log.events), default=now.timestamp())
+        since = max(datetime.fromtimestamp(oldest) - timedelta(days=1), now - timedelta(days=120))
+        resp = await self.client.async_api_call(
+            API_RECORD_SEARCH,
+            {
+                "channel": [f"CH{n}" for n in channels],
+                "start_date": since.strftime("%m/%d/%Y"),
+                "start_time": since.strftime("%H:%M:%S"),
+                "end_date": now.strftime("%m/%d/%Y"),
+                "end_time": now.strftime("%H:%M:%S"),
+                "record_type": 4294967295,
+                "smart_region": [],
+                "enable_smart_search": 0,
+            },
+        )
+        first: dict[int, float] = {}
+        for group in self._extract_data(resp).get("record") or []:
+            for rec in group if isinstance(group, list) else [group]:
+                if not isinstance(rec, dict):
+                    continue
+                num = channel_num_from_str(str(rec.get("channel", "")), 0)
+                try:
+                    start = datetime.strptime(
+                        f"{rec['start_date']} {rec['start_time']}", "%m/%d/%Y %H:%M:%S"
+                    ).timestamp()
+                except (KeyError, ValueError):
+                    continue
+                if num and (num not in first or start < first[num]):
+                    first[num] = start
+        # A channel with nothing recorded in the window has no archive at all.
+        for n in channels:
+            log.archive_start[n] = first.get(n, now.timestamp())
+        if (self.config_entry.options.get("journal_mode") or "count") == "nvr":
+            removed = log.clear("gone")
+            if removed:
+                _LOGGER.debug("Journal: %d events without a recording removed", removed)
 
     async def _async_record_history_loop(self) -> None:
         since = datetime.now() - timedelta(hours=RECORD_HISTORY_HOURS)

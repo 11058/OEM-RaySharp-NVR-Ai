@@ -172,6 +172,14 @@ def ws_overview(hass: HomeAssistant, connection, msg: dict) -> None:
             "nvrs": [_nvr_view(hass, e, c) for e, c in _entries(hass)],
             "events": log.recent(msg["limit"], msg.get("since")),
             "last_event": next((e["ts"] for e in log.recent(1)), None),
+            "journal": {
+                "events": len(log.events),
+                "pictures": len(log.pictures),
+                "max_events": log.max_events,
+                "max_pictures": log.max_pictures,
+                "gone": sum(1 for e in log.events if log.gone(e)),
+                "archive_from": min(log.archive_start.values()) if log.archive_start else None,
+            },
         },
     )
 
@@ -959,6 +967,21 @@ def ws_intercom_test_ring(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], ic.view())
 
 
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/journal_clear",
+        vol.Optional("mode", default="gone"): vol.In(["gone", "all"]),
+    }
+)
+@callback
+def ws_journal_clear(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Delete journal events: all of them, or those without a recording left."""
+    log = get_event_log(hass)
+    removed = log.clear(msg["mode"])
+    connection.send_result(msg["id"], {"removed": removed, "left": len(log.events)})
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
@@ -966,7 +989,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
                     ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe,
                     ws_intercom_subscribe, ws_intercom_state, ws_intercom_answer, ws_intercom_hangup,
-                    ws_intercom_test_ring):  # fmt: skip
+                    ws_intercom_test_ring, ws_journal_clear):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))
