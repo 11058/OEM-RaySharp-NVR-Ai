@@ -24,6 +24,10 @@ from .const import (
     CONF_PORT,
     CONF_SNAPSHOT_HISTORY_COUNT,
     CONF_STREAM_TYPE,
+    CONF_TALK_CHANNEL,
+    CONF_TALK_HOST,
+    CONF_TALK_PASSWORD,
+    CONF_TALK_USERNAME,
     CONF_USERNAME,
     DEFAULT_EVENT_PUSH_AUTO_CONFIGURE,
     DEFAULT_EVENT_TIMEOUT,
@@ -209,6 +213,23 @@ class RaySharpNVROptionsFlow(OptionsFlow):
                         CONF_STREAM_TYPE,
                         default=current_stream_type,
                     ): vol.In(list(STREAM_TYPES)),
+                    # Door panel straight, when the NVR does not pass talk-back on.
+                    vol.Optional(
+                        CONF_TALK_CHANNEL,
+                        default=int(self._config_entry.options.get(CONF_TALK_CHANNEL) or 0),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=256)),
+                    vol.Optional(
+                        CONF_TALK_HOST,
+                        default=self._config_entry.options.get(CONF_TALK_HOST, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_TALK_USERNAME,
+                        default=self._config_entry.options.get(CONF_TALK_USERNAME, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_TALK_PASSWORD,
+                        default=self._config_entry.options.get(CONF_TALK_PASSWORD, ""),
+                    ): str,
                 }
             ),
         )

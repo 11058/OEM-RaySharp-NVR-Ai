@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import logging
 import time
 from typing import Any
@@ -306,12 +307,44 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         for them.  When the options flow has switched stream_type, this is
         also where the new selection takes effect after a reload.
         """
+        nvr = await self.nvr_stream_source()
+        direct = self._direct_source(nvr)
+        return direct or nvr
+
+    async def nvr_stream_source(self) -> str | None:
+        """The channel's stream on the NVR: recordings are always fetched there."""
         rtsp_urls = _get_rtsp_urls(self.coordinator.data, self._stream_type)
         published = rtsp_urls.get(self._channel_num - 1)
         if not published:
             return self._rtsp_url or None
         url = _retarget_host(published, self._host)
         return _embed_creds(url, self._username, self._password)
+
+    def _direct_source(self, nvr: str | None) -> str | None:
+        """Live stream straight from the door panel when the options name it
+        for this channel: the NVR lists an audio back-channel but does not pass
+        the voice on to the panel (seen on Yug, NVR-327Re V8.2.7)."""
+        from .const import (  # noqa: PLC0415
+            CONF_TALK_CHANNEL,
+            CONF_TALK_HOST,
+            CONF_TALK_PASSWORD,
+            CONF_TALK_USERNAME,
+        )
+
+        opts = self.coordinator.config_entry.options if self.coordinator.config_entry else {}
+        if int(opts.get(CONF_TALK_CHANNEL) or 0) != self._channel_num or not opts.get(CONF_TALK_HOST):
+            return None
+        sub = "0"
+        m = re.search(r"[?&]subtype=(\d+)", nvr or "")
+        if m:
+            sub = m.group(1)
+        host = str(opts[CONF_TALK_HOST]).strip()
+        url = f"rtsp://{host}:554/rtsp/streaming?channel=1&subtype={sub}"
+        return _embed_creds(
+            url,
+            opts.get(CONF_TALK_USERNAME) or self._username,
+            opts.get(CONF_TALK_PASSWORD) or self._password,
+        )
 
     def profile_urls(self) -> dict[str, str]:
         """RTSP source per stream profile the NVR publishes for this channel.

@@ -11,6 +11,12 @@ CONF_PASSWORD = "password"
 CONF_EVENT_PUSH_AUTO_CONFIGURE = "event_push_auto_configure"
 CONF_EVENT_TIMEOUT = "event_timeout"
 CONF_STREAM_TYPE = "stream_type"
+# A door panel whose talk-back the NVR does not pass on: live video and the
+# two-way audio of that channel come straight from the panel itself.
+CONF_TALK_CHANNEL = "talk_channel"  # 0 = off
+CONF_TALK_HOST = "talk_host"
+CONF_TALK_USERNAME = "talk_username"
+CONF_TALK_PASSWORD = "talk_password"
 
 # Defaults
 DEFAULT_PORT = 80

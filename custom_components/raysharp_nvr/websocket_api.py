@@ -412,6 +412,13 @@ def _port_dead(why: str) -> bool:
     return any(s in w for s in ("refused", "timed out", "timeout", "unreachable", "no route"))
 
 
+async def _nvr_live(cam) -> str:
+    """The NVR's stream of the channel (a door panel's direct stream has no archive)."""
+    if hasattr(cam, "nvr_stream_source"):
+        return await cam.nvr_stream_source() or ""
+    return await cam.stream_source() or ""
+
+
 def _flat_ts(hass: HomeAssistant, camera: str) -> bool:
     return camera in hass.data.get(f"{DOMAIN}_flat_ts", set())
 
@@ -475,7 +482,7 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     if cam is None:
         connection.send_error(msg["id"], "not_found", "Камера не найдена")
         return
-    live = await cam.stream_source() or ""
+    live = await _nvr_live(cam)
     if "/rtsp/streaming" not in live:
         connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
         return
@@ -705,7 +712,7 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         token = new_token(hass, source, None, vcodec)
         connection.send_result(msg["id"], {"url": _url(token), "audio": audio, "video": vcodec})
         return
-    live = await cam.stream_source() or ""
+    live = await _nvr_live(cam)
     if "/rtsp/streaming" not in live:
         connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
         return
