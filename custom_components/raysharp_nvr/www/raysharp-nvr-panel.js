@@ -648,7 +648,7 @@ const STYLE = `
   .toolbar { display:flex; align-items:center; height:56px; padding:0 12px; gap:8px;
     background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff); }
   .title { font-size: 20px; }
-  .body { padding: 16px; max-width: 1600px; margin: 0 auto; box-sizing: border-box; }
+  .body { padding: clamp(8px, 1.2vw, 32px); margin: 0 auto; box-sizing: border-box; --z: 1; }
   h1 { font-size: 20px; font-weight: 500; margin: 0; } h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
   h3 { font-size: 13px; color: var(--secondary-text-color); margin: 12px 0 6px; font-weight: 500; }
   .sub { font-size: 12px; color: var(--secondary-text-color); } .muted { color: var(--secondary-text-color); padding: 8px; }
@@ -702,7 +702,7 @@ const STYLE = `
   .rec { position: absolute; right: 6px; top: 6px; background: rgba(0,0,0,.55); color: #ff5252; font-size: 11px; padding: 1px 6px; border-radius: 8px; }
   .cap { display:flex; align-items: baseline; justify-content: space-between; gap: 6px; padding: 6px 8px; }
   .cap b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .feed { position: sticky; top: 8px; max-height: calc(100vh - 90px); overflow-y: auto; }
+  .feed { position: sticky; top: 8px; max-height: calc((100vh - 90px) / var(--z, 1)); overflow-y: auto; }
   .ev { display:flex; gap: 8px; align-items: center; width: 100%; padding: 6px 4px; border: none; border-bottom: 1px solid var(--divider-color);
     background: transparent; color: var(--primary-text-color); text-align: left; cursor: pointer; font-size: 13px; }
   .ev img { width: 72px; height: 40px; object-fit: cover; border-radius: 4px; flex: none; }
@@ -730,6 +730,11 @@ const STYLE = `
   .ptz .act { padding: 6px 0; font-size: 16px; }
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }
+  /* Big screens: use the whole width and scale up, so a 4K monitor is not a
+     narrow strip of small text. The phone and laptop layout stays as it is. */
+  @media (min-width: 2000px) { .body, .sheet { zoom: 1.15; } .body { --z: 1.15; } }
+  @media (min-width: 2600px) { .body, .sheet { zoom: 1.3; } .body { --z: 1.3; } }
+  @media (min-width: 3400px) { .body, .sheet { zoom: 1.5; } .body { --z: 1.5; } }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .feed { position: static; max-height: none; } }
   @media (max-width: 600px) {
     .overlay { padding: 0; background: var(--card-background-color); }
