@@ -115,6 +115,18 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
         )
 
     warnings = []
+    skew = getattr(coord, "clock_skew_s", None)
+    if skew is not None and abs(skew) >= 900:
+        h, m = divmod(int(round(abs(skew) / 60)), 60)
+        import time as _t  # noqa: PLC0415
+
+        ha_off = -_t.timezone if not _t.localtime().tm_isdst else -_t.altzone
+        warnings.append(
+            f"Часы регистратора {'спешат' if skew > 0 else 'отстают'} на {h} ч {m:02d} мин относительно "
+            f"Home Assistant (UTC{ha_off / 3600:+g}) — скорее всего, сбит часовой пояс (обновление прошивки "
+            "ставит UTC+8). Записи, шкала архива и время событий будут сдвинуты: поставьте на регистраторе "
+            "часовой пояс как у Home Assistant и синхронизацию по NTP."
+        )
     snap_err = getattr(coord, "snapshot_errors", {})
     if snap_err:
         chans = ", ".join(f"CH{n}" for n in sorted(snap_err))

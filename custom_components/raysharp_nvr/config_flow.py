@@ -131,9 +131,7 @@ class RaySharpNVRConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             else:
                 new_data = {**reauth_entry.data, **user_input}
-                return self.async_update_reload_and_abort(
-                    reauth_entry, data=new_data
-                )
+                return self.async_update_and_abort(reauth_entry, data=new_data)
             finally:
                 await client.async_close()
 
@@ -174,7 +172,7 @@ class RaySharpNVRConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected exception during reconfigure")
                 errors["base"] = "unknown"
             else:
-                return self.async_update_reload_and_abort(entry, data=data)
+                return self.async_update_and_abort(entry, data=data)
             finally:
                 await client.async_close()
         d = {**entry.data, **(user_input or {})}

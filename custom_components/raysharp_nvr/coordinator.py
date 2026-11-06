@@ -264,6 +264,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ec_polls = 0
         self.record_flags: dict[int, bool] = {}
         self.nvr_offset_s: float | None = None  # NVR wall clock minus UTC
+        self.clock_skew_s: float | None = None  # newest recording end minus HA's now
         self.snapshot_errors: dict[int, str] = {}
         self.channel_abilities: dict[int, list[str]] = {}
         self._ec_errors = 0
@@ -653,20 +654,24 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now = datetime.now()
         oldest = min((e["ts"] for e in log.events), default=now.timestamp())
         since = max(datetime.fromtimestamp(oldest) - timedelta(days=1), now - timedelta(days=120))
+        # Search a day ahead too: an NVR whose clock runs ahead (time zone reset
+        # by a firmware update) writes recordings "in the future".
+        horizon = now + timedelta(days=1)
         resp = await self.client.async_api_call(
             API_RECORD_SEARCH,
             {
                 "channel": [f"CH{n}" for n in channels],
                 "start_date": since.strftime("%m/%d/%Y"),
                 "start_time": since.strftime("%H:%M:%S"),
-                "end_date": now.strftime("%m/%d/%Y"),
-                "end_time": now.strftime("%H:%M:%S"),
+                "end_date": horizon.strftime("%m/%d/%Y"),
+                "end_time": horizon.strftime("%H:%M:%S"),
                 "record_type": 4294967295,
                 "smart_region": [],
                 "enable_smart_search": 0,
             },
         )
         first: dict[int, float] = {}
+        latest = 0.0
         for group in self._extract_data(resp).get("record") or []:
             for rec in group if isinstance(group, list) else [group]:
                 if not isinstance(rec, dict):
@@ -680,6 +685,16 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 if num and (num not in first or start < first[num]):
                     first[num] = start
+                try:
+                    end = datetime.strptime(
+                        f"{rec['end_date']} {rec['end_time']}", "%m/%d/%Y %H:%M:%S"
+                    ).timestamp()
+                    latest = max(latest, end)
+                except (KeyError, ValueError):
+                    pass
+        # The newest recording ends "now" by the NVR's clock: far from HA's
+        # now means the NVR's clock or time zone is off.
+        self.clock_skew_s = latest - now.timestamp() if latest else None
         # A channel with nothing recorded in the window has no archive at all.
         for n in channels:
             log.archive_start[n] = first.get(n, now.timestamp())
