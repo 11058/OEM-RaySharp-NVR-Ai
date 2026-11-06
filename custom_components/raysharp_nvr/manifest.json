@@ -1,6 +1,9 @@
 {
   "domain": "raysharp_nvr",
   "name": "RaySharp NVR",
+  "after_dependencies": [
+    "ffmpeg"
+  ],
   "codeowners": [
     "@11058"
   ],
