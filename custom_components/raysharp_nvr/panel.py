@@ -37,6 +37,15 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
         [StaticPathConfig(f"{STATIC}/{BUNDLE}", str(WWW / BUNDLE), cache_headers=False)]
     )
     version = (await async_get_integration(hass, DOMAIN)).version or "0"
+    # The «Домофон» dashboard card, loaded on every dashboard.
+    card = "raysharp-intercom-card.js"
+    if (WWW / card).is_file():
+        from homeassistant.components.frontend import add_extra_js_url  # noqa: PLC0415
+
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(f"{STATIC}/{card}", str(WWW / card), cache_headers=False)]
+        )
+        add_extra_js_url(hass, f"{STATIC}/{card}?v={version}")
     await panel_custom.async_register_panel(
         hass,
         webcomponent_name="raysharp-nvr-panel",

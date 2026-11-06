@@ -290,8 +290,16 @@ class RaySharpCamera(RaySharpChannelEntity, Camera):
         from .const import DOMAIN  # noqa: PLC0415
         from .talk_probe import probe  # noqa: PLC0415
 
-        url = await self.stream_source()
-        if not url or not url.startswith("rtsp://"):
+        nvr = await self.nvr_stream_source()
+        url = self._direct_source(nvr)
+        if not url:
+            # NVRs list a back-channel on every channel but (seen on Yug) do
+            # not pass the voice on: offer talk only where a door panel is
+            # named in the options, which is also how we know it has a speaker.
+            self.hass.data.setdefault(f"{DOMAIN}_talk", {})[self.entity_id] = {
+                "backchannel": False,
+                "why": "разговор настраивается для канала вызывной панели (её адрес в настройках интеграции)",
+            }
             return
         result = await probe(url)
         self.hass.data.setdefault(f"{DOMAIN}_talk", {})[self.entity_id] = result

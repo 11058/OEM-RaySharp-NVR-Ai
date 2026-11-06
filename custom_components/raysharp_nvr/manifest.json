@@ -9,6 +9,7 @@
   ],
   "config_flow": true,
   "dependencies": [
+    "frontend",
     "http",
     "panel_custom",
     "websocket_api"
@@ -18,5 +19,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/11058/OEM-RaySharp-NVR-Ai/issues",
   "requirements": [],
-  "version": "1.5.7"
+  "version": "1.6.0"
 }
