@@ -218,3 +218,18 @@ def test_journal_limits_gone_and_clear():
     assert removed == len(gone) and not any(log.gone(e) for e in log.events)
     assert log.clear("all") == len(log.events) + 0 or True
     assert log.events == [] and log.pictures == {}
+
+
+def test_nvr_clock_conversion_any_zone():
+    events.set_nvr_offset(8 * 3600)  # NVR in UTC+8, whatever zone HA is in
+    try:
+        ts = events.wall_to_epoch("11/06/2026", "16:03:16")
+        assert ts == dt.datetime(2026, 11, 6, 8, 3, 16, tzinfo=dt.UTC).timestamp()
+        assert events.epoch_to_wall(ts) == ("11/06/2026", "16:03:16")
+        w = events.search_window(ts, ts + 60)
+        assert w["start_time"] == "16:03:16" and w["end_time"] == "16:04:16"
+        now = dt.datetime(2026, 11, 6, 8, 14, 34, tzinfo=dt.UTC).timestamp()
+        assert events.offset_from_date_header("Fri, 06 Nov 2026 16:14:34 GMT", now) == 8 * 3600
+        assert events.offset_from_date_header("Fri, 06 Nov 2026 13:14:40 GMT", now) == 5 * 3600
+    finally:
+        events.set_nvr_offset(None)

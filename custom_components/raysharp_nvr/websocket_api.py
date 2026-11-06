@@ -115,17 +115,23 @@ def _nvr_view(hass: HomeAssistant, entry, coord) -> dict[str, Any]:
         )
 
     warnings = []
+    import time as _t  # noqa: PLC0415
+
+    ha_off = float(_t.localtime().tm_gmtoff)
+    nvr_off = getattr(coord, "nvr_offset_s", None)
+    if nvr_off is not None and abs(nvr_off - ha_off) >= 900:
+        # Not a fault: every time is converted. Told because the picture's own
+        # clock (OSD) shows the NVR's time.
+        warnings.append(
+            f"Часовой пояс регистратора UTC{nvr_off / 3600:+g}, у Home Assistant UTC{ha_off / 3600:+g}: "
+            "время событий и архива пересчитывается автоматически; часы в кадре показывают время регистратора."
+        )
     skew = getattr(coord, "clock_skew_s", None)
     if skew is not None and abs(skew) >= 900:
         h, m = divmod(int(round(abs(skew) / 60)), 60)
-        import time as _t  # noqa: PLC0415
-
-        ha_off = -_t.timezone if not _t.localtime().tm_isdst else -_t.altzone
         warnings.append(
-            f"Часы регистратора {'спешат' if skew > 0 else 'отстают'} на {h} ч {m:02d} мин относительно "
-            f"Home Assistant (UTC{ha_off / 3600:+g}) — скорее всего, сбит часовой пояс (обновление прошивки "
-            "ставит UTC+8). Записи, шкала архива и время событий будут сдвинуты: поставьте на регистраторе "
-            "часовой пояс как у Home Assistant и синхронизацию по NTP."
+            f"Часы регистратора {'спешат' if skew > 0 else 'отстают'} на {h} ч {m:02d} мин — включите "
+            "на регистраторе синхронизацию времени по NTP."
         )
     snap_err = getattr(coord, "snapshot_errors", {})
     if snap_err:
@@ -322,8 +328,12 @@ def playback_url(
         t0 = dt.datetime.fromtimestamp(start, dt.UTC).strftime(fmt)
         t1 = dt.datetime.fromtimestamp(end, dt.UTC).strftime(fmt)
     else:
-        t0 = dt.datetime.fromtimestamp(start).strftime(fmt)
-        t1 = dt.datetime.fromtimestamp(end).strftime(fmt)
+        # "local" = the NVR's own wall clock (its offset is learned), not HA's.
+        from .events import nvr_offset  # noqa: PLC0415
+
+        off = nvr_offset()
+        t0 = dt.datetime.fromtimestamp(start + off, dt.UTC).strftime(fmt)
+        t1 = dt.datetime.fromtimestamp(end + off, dt.UTC).strftime(fmt)
     url = live.replace("/rtsp/streaming", "/rtsp/playback", 1)
     # NVRs record the main stream only: asking for the recording of the sub
     # or mobile stream (what the grid shows) returns a session without video.
@@ -795,8 +805,11 @@ async def ws_timeline(hass: HomeAssistant, connection, msg: dict) -> None:
     except ValueError:
         connection.send_error(msg["id"], "bad_day", "Неверная дата")
         return
+    from .events import search_window  # noqa: PLC0415
+
     coord = cam.coordinator
     num = cam._channel_num  # noqa: SLF001
+    # The day as the viewer means it (HA's zone), asked in the NVR's own clock.
     since = datetime.combine(day, datetime.min.time())
     until = since + timedelta(days=1) - timedelta(seconds=1)
     try:
@@ -804,10 +817,7 @@ async def ws_timeline(hass: HomeAssistant, connection, msg: dict) -> None:
             API_RECORD_SEARCH,
             {
                 "channel": [f"CH{num}"],
-                "start_date": since.strftime("%m/%d/%Y"),
-                "start_time": since.strftime("%H:%M:%S"),
-                "end_date": until.strftime("%m/%d/%Y"),
-                "end_time": until.strftime("%H:%M:%S"),
+                **search_window(since.timestamp(), until.timestamp()),
                 "record_type": 4294967295,
                 "smart_region": [],
                 "enable_smart_search": 0,

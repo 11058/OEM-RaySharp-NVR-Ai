@@ -71,6 +71,42 @@ def nvr_offset() -> float:
     return float(time.localtime().tm_gmtoff)
 
 
+def wall_to_epoch(date_s: str, time_s: str) -> float:
+    """NVR wall clock ('11/06/2026', '16:03:16') -> unix time, by the NVR's own
+    UTC offset (learned from its clock), whatever zone HA or the NVR is in."""
+    wall = dt.datetime.strptime(f"{date_s} {time_s}", "%m/%d/%Y %H:%M:%S")
+    return wall.replace(tzinfo=dt.UTC).timestamp() - nvr_offset()
+
+
+def epoch_to_wall(ts: float) -> tuple[str, str]:
+    """unix time -> the NVR's wall clock as its API wants it (date, time)."""
+    wall = dt.datetime.fromtimestamp(ts + nvr_offset(), dt.UTC)
+    return wall.strftime("%m/%d/%Y"), wall.strftime("%H:%M:%S")
+
+
+def search_window(since: float, until: float) -> dict[str, str]:
+    """start_/end_ date and time for Playback/SearchRecord, in the NVR's clock."""
+    d0, t0 = epoch_to_wall(since)
+    d1, t1 = epoch_to_wall(until)
+    return {"start_date": d0, "start_time": t0, "end_date": d1, "end_time": t1}
+
+
+def offset_from_date_header(value: str, now: float | None = None) -> float | None:
+    """RTSP/HTTP 'Date: Fri, 06 Nov 2026 16:14:34 GMT' from a RaySharp NVR is its
+    WALL clock labelled GMT: minus the real time it gives the NVR's UTC offset."""
+    from email.utils import parsedate_to_datetime  # noqa: PLC0415
+
+    try:
+        wall = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if wall is None:
+        return None
+    if wall.tzinfo is None:
+        wall = wall.replace(tzinfo=dt.UTC)
+    return round((wall.timestamp() - (now if now is not None else time.time())) / 900) * 900
+
+
 def learn_offset(nvr_clock: str, now: float | None = None) -> float | None:
     """'11/05/2026 18:59:25' (Event Check alarm_list time) -> UTC offset, s."""
     for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
@@ -133,8 +169,7 @@ def record_event_type(rec: dict[str, Any]) -> str | None:
 def timeline_segments(rows: Any, channel: int) -> list[dict[str, Any]]:
     """SearchRecord rows -> [{s, e, kind}] for one channel, sorted; touching
     pieces of the same kind merged. kind: normal / motion / smart / pir / io.
-    Times are the NVR's local wall clock, read in HA's zone like the rest."""
-    from datetime import datetime  # noqa: PLC0415
+    Times come in the NVR's wall clock and are converted by its own offset."""
 
     out: list[dict[str, Any]] = []
     for rec in rows:
@@ -142,12 +177,12 @@ def timeline_segments(rows: Any, channel: int) -> list[dict[str, Any]]:
         if digits and int(digits) != channel:
             continue
         try:
-            s = datetime.strptime(f"{rec['start_date']} {rec['start_time']}", "%m/%d/%Y %H:%M:%S")
-            e = datetime.strptime(f"{rec['end_date']} {rec['end_time']}", "%m/%d/%Y %H:%M:%S")
+            s = wall_to_epoch(rec["start_date"], rec["start_time"])
+            e = wall_to_epoch(rec["end_date"], rec["end_time"])
         except (KeyError, ValueError):
             continue
         kind = record_event_type(rec) or "normal"
-        out.append({"s": s.timestamp(), "e": e.timestamp(), "kind": kind})
+        out.append({"s": s, "e": e, "kind": kind})
     out.sort(key=lambda r: (r["s"], r["e"]))
     merged: list[dict[str, Any]] = []
     for r in out:

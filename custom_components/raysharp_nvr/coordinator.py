@@ -632,8 +632,14 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Where the NVR's archive starts, per channel, once an hour: events
         older than that have no video any more (overwritten, disk formatted).
         In the "nvr" journal mode those events leave the journal too."""
-        await asyncio.sleep(60)
+        await asyncio.sleep(20)
         while True:
+            try:
+                await self._async_learn_clock()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - keep trying
+                _LOGGER.debug("NVR clock: %s", err)
             try:
                 await self._async_archive_bounds()
             except asyncio.CancelledError:
@@ -641,6 +647,44 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:  # noqa: BLE001 - keep trying
                 _LOGGER.debug("Archive bounds failed: %s", err)
             await asyncio.sleep(3600)
+
+    async def _async_learn_clock(self) -> None:
+        """The NVR's UTC offset from the Date of an RTSP OPTIONS answer (its
+        wall clock labelled GMT; no login needed). Every NVR wall-clock time —
+        recordings, the archive search, AI pictures — is converted with it, so
+        any NVR time zone works whatever zone HA is in."""
+        import re as _re  # noqa: PLC0415
+        import time as _time  # noqa: PLC0415
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        from .events import offset_from_date_header, set_nvr_offset  # noqa: PLC0415
+
+        text = str((self.data or {}).get(DATA_RTSP_URLS) or "")
+        m = _re.search(r"rtsp://[^\s'\"]+", text)
+        port = urlparse(m.group(0)).port if m else None
+        for p in [port or 554, 554, 80]:
+            try:
+                reader, writer = await asyncio.wait_for(asyncio.open_connection(self.client._host, p), 5)  # noqa: SLF001
+            except (OSError, TimeoutError):
+                continue
+            try:
+                writer.write(f"OPTIONS rtsp://{self.client._host}:{p}/ RTSP/1.0\r\nCSeq: 1\r\n\r\n".encode())  # noqa: SLF001
+                await writer.drain()
+                head = (await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)).decode(errors="replace")
+            except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+                continue
+            finally:
+                writer.close()
+            if not head.startswith("RTSP/"):
+                continue
+            d = _re.search(r"(?im)^date:\s*(.+)$", head)
+            off = offset_from_date_header(d.group(1).strip(), _time.time()) if d else None
+            if off is not None:
+                if off != self.nvr_offset_s:
+                    _LOGGER.info("NVR clock: UTC%+.2g h (Date header)", off / 3600)
+                self.nvr_offset_s = off
+                set_nvr_offset(off)
+                return
 
     async def _async_archive_bounds(self) -> None:
         from .events import get_event_log  # noqa: PLC0415
@@ -657,14 +701,13 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Search a day ahead too: an NVR whose clock runs ahead (time zone reset
         # by a firmware update) writes recordings "in the future".
         horizon = now + timedelta(days=1)
+        from .events import search_window, wall_to_epoch  # noqa: PLC0415
+
         resp = await self.client.async_api_call(
             API_RECORD_SEARCH,
             {
                 "channel": [f"CH{n}" for n in channels],
-                "start_date": since.strftime("%m/%d/%Y"),
-                "start_time": since.strftime("%H:%M:%S"),
-                "end_date": horizon.strftime("%m/%d/%Y"),
-                "end_time": horizon.strftime("%H:%M:%S"),
+                **search_window(since.timestamp(), horizon.timestamp()),
                 "record_type": 4294967295,
                 "smart_region": [],
                 "enable_smart_search": 0,
@@ -678,17 +721,13 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 num = channel_num_from_str(str(rec.get("channel", "")), 0)
                 try:
-                    start = datetime.strptime(
-                        f"{rec['start_date']} {rec['start_time']}", "%m/%d/%Y %H:%M:%S"
-                    ).timestamp()
+                    start = wall_to_epoch(rec["start_date"], rec["start_time"])
                 except (KeyError, ValueError):
                     continue
                 if num and (num not in first or start < first[num]):
                     first[num] = start
                 try:
-                    end = datetime.strptime(
-                        f"{rec['end_date']} {rec['end_time']}", "%m/%d/%Y %H:%M:%S"
-                    ).timestamp()
+                    end = wall_to_epoch(rec["end_date"], rec["end_time"])
                     latest = max(latest, end)
                 except (KeyError, ValueError):
                     pass
@@ -705,7 +744,13 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_record_history_loop(self) -> None:
         since = datetime.now() - timedelta(hours=RECORD_HISTORY_HOURS)
-        await asyncio.sleep(20)  # let the first refresh and Event Check settle
+        # Let the first refresh settle and the NVR's clock be learned first
+        # (recordings come in its wall clock).
+        await asyncio.sleep(20)
+        for _ in range(30):
+            if self.nvr_offset_s is not None:
+                break
+            await asyncio.sleep(1)
         while True:
             until = datetime.now()
             try:
@@ -730,14 +775,13 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ]
         if not channels:
             return 0
+        from .events import search_window, wall_to_epoch  # noqa: PLC0415
+
         resp = await self.client.async_api_call(
             API_RECORD_SEARCH,
             {
                 "channel": channels,
-                "start_date": since.strftime("%m/%d/%Y"),
-                "start_time": since.strftime("%H:%M:%S"),
-                "end_date": until.strftime("%m/%d/%Y"),
-                "end_time": until.strftime("%H:%M:%S"),
+                **search_window(since.timestamp(), until.timestamp()),
                 "record_type": 4294967295,
                 "smart_region": [],
                 "enable_smart_search": 0,
@@ -753,12 +797,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if kind is None:
                     continue
                 try:
-                    start = datetime.strptime(
-                        f"{rec['start_date']} {rec['start_time']}", "%m/%d/%Y %H:%M:%S"
-                    ).timestamp()
-                    end = datetime.strptime(
-                        f"{rec['end_date']} {rec['end_time']}", "%m/%d/%Y %H:%M:%S"
-                    ).timestamp()
+                    start = wall_to_epoch(rec["start_date"], rec["start_time"])
+                    end = wall_to_epoch(rec["end_date"], rec["end_time"])
                 except (KeyError, ValueError):
                     continue
                 num = channel_num_from_str(str(rec.get("channel", "")), 0)
