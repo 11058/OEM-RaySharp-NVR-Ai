@@ -542,21 +542,49 @@ class RaySharpNvrPanel extends HTMLElement {
       }
     };
     if (mode === "talk") {
-      // HA 2026.11 draws the talk button itself on its WebRTC player when the
-      // camera declares two-way audio, Labs → «Двусторонняя связь» is on and
-      // the page is opened over HTTPS (the browser's microphone rule).
+      const el = document.createElement("ha-camera-stream");
       if (st && customElements.get("ha-camera-stream")) {
-        const el = document.createElement("ha-camera-stream");
         el.hass = this._hass; el.stateObj = st; el.muted = false; el.controls = true; el.allowExoPlayer = true;
         live.innerHTML = ""; live.appendChild(el); this._stream = el;
       }
-      const tips = [];
-      if (location.protocol !== "https:") tips.push("страница открыта по http — браузер не даст микрофон, откройте HA по https");
-      tips.push("кнопка микрофона появляется на видео, когда в «Настройки → Система → Labs» включена «Двусторонняя связь»");
-      const note = document.createElement("div");
-      note.className = location.protocol !== "https:" ? "warnbar" : "sub";
-      note.textContent = "🎙 " + tips.join("; ") + ".";
-      live.after(note);
+      // HA 2026.11 keeps the talk button in its own camera dialog; the player
+      // only exposes toggleMicrophone(). Offer both: talk here, or HA's dialog
+      // (which the HA apps will support over http too).
+      const bar = document.createElement("div");
+      bar.className = "talkbar";
+      const secure = window.isSecureContext;
+      bar.innerHTML = `<button class="act primary" data-talk="mic" ${secure ? "" : "disabled"}>🎙 Начать говорить</button>
+        <button class="act" data-talk="dialog">Окно камеры Home Assistant</button>
+        <span class="sub talkstate">${secure ? "микрофон выключен" : ""}</span>`;
+      live.after(bar);
+      if (!secure) {
+        const w = document.createElement("div");
+        w.className = "warnbar";
+        w.textContent = "⚠ Страница открыта по http — браузер не даёт микрофон. Откройте Home Assistant по https (адрес вида https://…srvprm.ru) или нажмите «Окно камеры Home Assistant» в приложении.";
+        bar.after(w);
+      }
+      const micBtn = bar.querySelector('[data-talk="mic"]'), micState = bar.querySelector(".talkstate");
+      const show = () => {
+        const on = this._stream === el && !!el.microphoneTrack;
+        micBtn.textContent = on ? "⏹ Закончить разговор" : "🎙 Начать говорить";
+        micBtn.classList.toggle("on", on);
+        if (secure) micState.textContent = on ? "● вас слышно у панели" : "микрофон выключен";
+      };
+      el.addEventListener("camera-capabilities-changed", (ev) => {
+        const ok = ev.detail && ev.detail.capabilities && ev.detail.capabilities.two_way_audio;
+        if (!ok && secure) { micBtn.disabled = true; micState.textContent = "HA не разрешил разговор с этой камерой: включите «Настройки → Система → Labs → Двусторонняя связь»"; }
+      });
+      micBtn.onclick = async (ev) => {
+        ev.stopPropagation();
+        micBtn.disabled = true;
+        try { await el.toggleMicrophone(); } catch (e) { micState.textContent = `микрофон: ${e.message || e}`; }
+        micBtn.disabled = false;
+        setTimeout(show, 300); setTimeout(show, 1500);
+      };
+      bar.querySelector('[data-talk="dialog"]').onclick = (ev) => {
+        ev.stopPropagation();
+        this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: ch.camera }, bubbles: true, composed: true }));
+      };
     } else if (mode === "archive") {
       this._renderTimeline();
       if (a && a.play) {
@@ -1098,6 +1126,9 @@ const STYLE = `
   .ovl { position: absolute; inset: 0; pointer-events: none; }
   .tile { display: block; }
   .prof { margin-bottom: 8px; align-items: center; }
+  .talkbar { display:flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .talkbar .act { font-size: 15px; padding: 8px 14px; }
+  .talkbar .act.on { background: var(--error-color, #c62828); border-color: var(--error-color, #c62828); color: #fff; }
   .modes { margin-bottom: 6px; align-items: center; }
   .warnbar { margin: 8px 0; padding: 8px 12px; border-radius: 8px; font-size: 13px;
     border-left: 4px solid var(--warning-color, #ffa600); background: var(--secondary-background-color); }
