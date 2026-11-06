@@ -130,6 +130,35 @@ def record_event_type(rec: dict[str, Any]) -> str | None:
     return "motion" if code not in ("", "N") else None
 
 
+def timeline_segments(rows: Any, channel: int) -> list[dict[str, Any]]:
+    """SearchRecord rows -> [{s, e, kind}] for one channel, sorted; touching
+    pieces of the same kind merged. kind: normal / motion / smart / pir / io.
+    Times are the NVR's local wall clock, read in HA's zone like the rest."""
+    from datetime import datetime  # noqa: PLC0415
+
+    out: list[dict[str, Any]] = []
+    for rec in rows:
+        digits = "".join(c for c in str(rec.get("channel", "")) if c.isdigit())
+        if digits and int(digits) != channel:
+            continue
+        try:
+            s = datetime.strptime(f"{rec['start_date']} {rec['start_time']}", "%m/%d/%Y %H:%M:%S")
+            e = datetime.strptime(f"{rec['end_date']} {rec['end_time']}", "%m/%d/%Y %H:%M:%S")
+        except (KeyError, ValueError):
+            continue
+        kind = record_event_type(rec) or "normal"
+        out.append({"s": s.timestamp(), "e": e.timestamp(), "kind": kind})
+    out.sort(key=lambda r: (r["s"], r["e"]))
+    merged: list[dict[str, Any]] = []
+    for r in out:
+        last = merged[-1] if merged else None
+        if last and last["kind"] == r["kind"] and r["s"] <= last["e"] + 2:
+            last["e"] = max(last["e"], r["e"])
+        else:
+            merged.append(dict(r))
+    return merged
+
+
 class EventLog:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []  # oldest first

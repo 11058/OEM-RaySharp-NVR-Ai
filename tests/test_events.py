@@ -173,3 +173,29 @@ def test_old_history_moved_back_on_load():
         assert log.dump()["clock"] == 2
     finally:
         ev.set_nvr_offset(None)
+
+
+def test_timeline_segments_merge_and_kinds():
+    from datetime import datetime
+
+    timeline_segments = events.timeline_segments
+
+    def row(ch, a, b, code="N", mask=1):
+        return {"channel": ch, "start_date": "11/05/2026", "start_time": a,
+                "end_date": "11/05/2026", "end_time": b,
+                "new_record_type": code, "record_type": mask}
+
+    rows = [
+        row("CH1", "10:00:00", "10:30:00"),
+        row("CH1", "10:30:01", "11:00:00"),
+        row("CH1", "10:40:00", "10:41:00", "SN", 128),
+        row("CH2", "10:00:00", "12:00:00"),
+        row("CH1", "12:00:00", "12:00:30", "M", 2),
+    ]
+    segs = timeline_segments(rows, 1)
+    t = lambda h: datetime.strptime(f"11/05/2026 {h}", "%m/%d/%Y %H:%M:%S").timestamp()  # noqa: E731
+    assert [(x["kind"], x["s"], x["e"]) for x in segs] == [
+        ("normal", t("10:00:00"), t("11:00:00")),
+        ("smart", t("10:40:00"), t("10:41:00")),
+        ("motion", t("12:00:00"), t("12:00:30")),
+    ]

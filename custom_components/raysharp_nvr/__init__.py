@@ -1453,6 +1453,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coordinator.async_add_listener(_check_event_push_enabled)
         )
 
+    from .channel_watch import attach as _watch_channels  # noqa: PLC0415
+    from .coordinator import get_channel_list as _channels  # noqa: PLC0415
+
+    entry.async_on_unload(_watch_channels(hass, entry, coordinator, _channels))
+
     # Register services (idempotent — only register once across all entries).
     # NOTE: handlers must be true coroutine functions, not sync lambdas that
     # return a coroutine.  HA's HassJob inspects the callable via

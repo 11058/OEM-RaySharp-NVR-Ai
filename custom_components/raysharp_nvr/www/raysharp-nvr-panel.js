@@ -46,6 +46,18 @@ function ago(ts) {
 }
 
 const PROFILES = [["auto", "Авто"], ["main", "Основной"], ["sub", "Доп."], ["mobile", "Моб."]];
+// Recordings: NVRs usually record only the main stream; the others are offered
+// when the camera has them and the NVR says why when it does not record them.
+const REC_PROFILES = [["main", "Основной"], ["sub", "Доп."], ["mobile", "Моб."]];
+const SEG = { normal: "запись", motion: "движение", smart: "AI", pir: "PIR", io: "тревога" };
+const SPANS = [[86400, "24 ч"], [6 * 3600, "6 ч"], [3600, "1 ч"], [600, "10 мин"]];
+const STALL_S = 20; // no picture after this long = tell the user the stream did not connect
+function dayStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function hm(ts, sec = false) {
+  return new Date(ts * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", ...(sec ? { second: "2-digit" } : {}) });
+}
 const store = {
   get(k, d) { try { const v = localStorage.getItem(`raysharp_nvr_${k}`); return v === null ? d : v; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(`raysharp_nvr_${k}`, String(v)); } catch (e) { /* private mode */ } },
@@ -108,7 +120,9 @@ class RaySharpNvrPanel extends HTMLElement {
     this._showEmpty = false;
     this._period = loadPeriod();
     this._filter = "";
-    this._open = null; // {entry, num, clip}
+    this._open = null; // {entry, num, clip, until, mode: live | clip | archive}
+    this._recProfile = store.get("rec_profile", "main");
+    this._arch = null; // archive: {cam, day, data, span, center, play, chunk, video}
     this._confirm = null;
     this._error = "";
   }
@@ -446,31 +460,53 @@ class RaySharpNvrPanel extends HTMLElement {
   _renderModal() {
     const host = this.shadowRoot.getElementById("modal");
     if (!host) return;
-    if (!this._open) { host.innerHTML = ""; host.dataset.key = ""; this._stream = null; return; }
+    if (!this._open) {
+      host.innerHTML = ""; host.dataset.key = ""; this._stream = null;
+      this._arch = null; clearInterval(this._archTimer); return;
+    }
     const n = this._nvrs.find((x) => x.entry_id === this._open.entry);
     const ch = n && n.channels.find((c) => c.num === this._open.num);
     if (!ch) { host.innerHTML = ""; return; }
+    const mode = this._open.mode || (this._open.clip ? "clip" : "live");
     const act = this._active(n, ch);
     const evs = this._events.filter((e) => e.channel === ch.num).slice(0, 12);
-    const profiles = PROFILES.filter(([p]) => p === "auto" || (ch.streams || []).includes(p));
+    const has = (p) => (ch.streams || []).includes(p);
+    const profiles = PROFILES.filter(([p]) => p === "auto" || has(p));
     const profile = profiles.some(([p]) => p === this._profile) ? this._profile : "auto";
-    const key = `${n.entry_id}:${ch.num}:${this._open.clip || "live"}:${profile}`;
+    const recProfiles = REC_PROFILES.filter(([p]) => p === "main" || has(p));
+    const recProfile = recProfiles.some(([p]) => p === this._recProfile) ? this._recProfile : "main";
+    if (mode === "archive") this._archEnsure(ch);
+    else { this._arch = null; clearInterval(this._archTimer); }
+    const a = this._arch;
+    const playKey = mode === "archive" ? `arch:${a && a.play ? Math.round(a.play) : "-"}`
+      : mode === "clip" ? `clip:${this._open.clip}` : "live";
+    const key = `${n.entry_id}:${ch.num}:${playKey}:${mode === "live" ? profile : recProfile}`;
     if (host.firstChild && host.dataset.key === key) {
-      // Keep the playing video; refresh only the info below it.
+      // Keep the playing video; refresh only what is around it.
       const info = host.querySelector("#info");
       if (info) info.innerHTML = this._modalInfo(n, ch, act, evs);
+      this._renderTimeline();
       this._bindModal(host, n, ch);
       return;
     }
     host.dataset.key = key;
+    const modeTabs = `<div class="tabs modes">
+        <button class="tab ${mode === "live" ? "on" : ""}" data-mode="live">● Эфир</button>
+        <button class="tab ${mode === "archive" ? "on" : ""}" data-mode="archive">🕘 Архив</button>
+        ${mode === "clip" ? `<span class="chip">запись события ${hhmm(this._open.clip)}</span>` : ""}</div>`;
+    const streamTabs = mode === "live"
+      ? profiles.map(([p, l]) => `<button class="tab ${p === profile ? "on" : ""}" data-prof="${p}">${l}</button>`).join("")
+      : recProfiles.map(([p, l]) => `<button class="tab ${p === recProfile ? "on" : ""}" data-rprof="${p}">${l}</button>`).join("");
     host.innerHTML = `<div class="overlay" data-do="close-bg"><div class="sheet">
       <div class="shead"><b>${esc(ch.name)}</b><span class="sub">CH${ch.num}</span>
-        ${this._open.clip ? `<span class="chip">запись ${hhmm(this._open.clip)}</span><button class="act" data-do="live">● Прямой эфир</button>` : '<span class="chip onair">● эфир</span>'}
+        ${mode === "live" ? '<span class="chip onair">● эфир</span>' : ""}
         <span class="grow"></span>
         <button class="x" data-do="close" aria-label="Закрыть">✕</button></div>
-      ${this._open.clip ? "" : `<div class="tabs prof">${profiles.map(([p, l]) =>
-        `<button class="tab ${p === profile ? "on" : ""}" data-prof="${p}">${l}</button>`).join("")}</div>`}
+      ${modeTabs}
+      <div class="tabs prof"><span class="sub">Поток${mode === "live" ? "" : " записи"}:</span>${streamTabs}</div>
+      ${!ch.online || ch.videoloss ? `<div class="warnbar">⚠ Камера ${ch.videoloss ? "потеряла видеосигнал" : "не в сети"} — потока нет, запись с неё сейчас не идёт.</div>` : ""}
       <div id="live" class="live"></div>
+      ${mode === "archive" ? '<div id="tl" class="tl"></div>' : ""}
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
@@ -483,10 +519,19 @@ class RaySharpNvrPanel extends HTMLElement {
         live.innerHTML = ""; live.appendChild(el); this._stream = el;
       }
     };
-    if (this._open.clip && ch.camera) {
+    if (mode === "archive") {
+      this._renderTimeline();
+      if (a && a.play) {
+        const t = a.play;
+        this._playAv(live, key, { camera: ch.camera, ts: t, until: t + 600, exact: true, profile: recProfile },
+          null, `Открываю архив с ${hm(t, true)}…`, (v, res) => this._archVideo(v, res, t));
+      } else {
+        live.innerHTML = `<div class="noimg">Выберите время на шкале ниже — запись начнётся с этого момента</div>`;
+      }
+    } else if (mode === "clip" && ch.camera) {
       const { clip, until } = this._open;
-      this._playAv(live, key, { camera: ch.camera, ts: clip, ...(until ? { until } : {}) },
-        () => this._playClip(live, ch, clip, until), "Открываю запись…");
+      this._playAv(live, key, { camera: ch.camera, ts: clip, ...(until ? { until } : {}), profile: recProfile },
+        recProfile === "main" ? () => this._playClip(live, ch, clip, until) : null, "Открываю запись…");
     } else if (ch.camera) {
       this._playAv(live, key, { camera: ch.camera, profile: profile === "auto" ? "main" : profile },
         hlsLive, "Подключаюсь…");
@@ -502,10 +547,196 @@ class RaySharpNvrPanel extends HTMLElement {
     this._bindModal(host, n, ch);
   }
 
+  // --- archive ----------------------------------------------------------------
+  _archEnsure(ch) {
+    const a = this._arch;
+    if (a && a.cam === ch.camera) return;
+    clearInterval(this._archTimer);
+    const today = dayStr(new Date());
+    this._arch = { cam: ch.camera, day: today, data: null, err: "", span: 86400, center: null, play: null, video: null, chunk: null };
+    this._archLoad();
+    this._archTimer = setInterval(() => this._archTick(), 1000);
+  }
+
+  async _archLoad() {
+    const a = this._arch;
+    if (!a) return;
+    a.data = null; a.err = ""; this._renderTimeline();
+    try {
+      const d = await this._hass.callWS({ type: "raysharp_nvr/timeline", camera: a.cam, day: a.day });
+      if (this._arch !== a) return;
+      a.data = d;
+      if (a.center === null || a.center < d.start || a.center >= d.end) a.center = (d.start + d.end) / 2;
+    } catch (e) {
+      if (this._arch !== a) return;
+      a.err = e.message || String(e);
+    }
+    this._renderTimeline();
+  }
+
+  _archWindow() {
+    const a = this._arch, d = a.data;
+    const span = Math.min(a.span, d.end - d.start);
+    let w0 = (a.center ?? d.start) - span / 2;
+    w0 = Math.max(d.start, Math.min(d.end - span, w0));
+    return [w0, w0 + span];
+  }
+
+  _archMarks() {
+    const d = this._arch && this._arch.data;
+    if (!d) return [];
+    const m = [...d.segments.filter((x) => x.kind !== "normal").map((x) => x.s), ...d.events.map((e) => e.ts)];
+    return [...new Set(m.map((t) => Math.round(t)))].sort((x, y) => x - y);
+  }
+
+  _archPlay(ts) {
+    const a = this._arch, d = a && a.data;
+    if (!d) return;
+    // Nothing recorded at that moment: start at the next recorded piece.
+    const inside = d.segments.some((x) => x.s <= ts && ts < x.e);
+    if (!inside) {
+      const next = d.segments.find((x) => x.s > ts);
+      if (!next) { a.err = `После ${hm(ts)} записей за этот день нет`; this._renderTimeline(); return; }
+      ts = next.s;
+    }
+    a.err = ""; a.play = ts; a.pos = ts;
+    this._renderModal();
+  }
+
+  _archVideo(v, res, start) {
+    const a = this._arch;
+    if (!a) return;
+    a.video = v; a.chunk = { start: res.start ?? start, duration: res.duration || 600 };
+    v.addEventListener("ended", () => {
+      // The archive plays in 10-minute pieces: go on with the next one.
+      if (this._arch === a && a.chunk) this._archPlay(a.chunk.start + a.chunk.duration);
+    });
+  }
+
+  _archTick() {
+    const a = this._arch;
+    if (!a || !a.video || !a.chunk || !a.video.isConnected) return;
+    a.pos = a.chunk.start + (a.video.currentTime || 0);
+    const d = a.data;
+    if (d && a.span < 86400) {
+      const [w0, w1] = this._archWindow();
+      if (a.pos > w1 - (w1 - w0) * 0.05) a.center = a.pos + (w1 - w0) * 0.4; // follow the playhead
+      else { this._moveCursor(); return; }
+    }
+    if (a.span >= 86400) { this._moveCursor(); return; }
+    this._renderTimeline();
+  }
+
+  _moveCursor() {
+    const a = this._arch, tl = this.shadowRoot.getElementById("tl");
+    if (!a || !a.data || !tl) return;
+    const cur = tl.querySelector(".cur"), lab = tl.querySelector(".poslabel");
+    const [w0, w1] = this._archWindow();
+    if (cur && a.pos) { cur.style.left = `${((a.pos - w0) / (w1 - w0)) * 100}%`; cur.hidden = a.pos < w0 || a.pos > w1; }
+    if (lab && a.pos) lab.textContent = hm(a.pos, true);
+  }
+
+  _renderTimeline() {
+    const a = this._arch, tl = this.shadowRoot.getElementById("tl");
+    if (!a || !tl) return;
+    const d = a.data;
+    const head = `<div class="tlbar">
+        <button class="act" data-arch="day-">◀</button>
+        <input type="date" class="tldate" value="${esc(a.day)}" max="${dayStr(new Date())}">
+        <button class="act" data-arch="day+" ${a.day >= dayStr(new Date()) ? "disabled" : ""}>▶</button>
+        <span class="sep"></span>
+        ${SPANS.map(([v, l]) => `<button class="tab ${a.span === v ? "on" : ""}" data-span="${v}">${l}</button>`).join("")}
+        <span class="sep"></span>
+        <button class="act" data-arch="pan-" title="Раньше">‹</button>
+        <button class="act" data-arch="pan+" title="Позже">›</button>
+        <span class="sep"></span>
+        <button class="act" data-arch="prev" title="Предыдущее событие">⏮ событие</button>
+        <button class="act" data-arch="next" title="Следующее событие">событие ⏭</button>
+        <span class="grow"></span>
+        <b class="poslabel">${a.pos ? hm(a.pos, true) : ""}</b>
+      </div>`;
+    if (a.err && !d) { tl.innerHTML = head + `<div class="warnbar">${esc(a.err)}</div>`; this._bindTimeline(); return; }
+    if (!d) { tl.innerHTML = head + '<div class="sub">Ищу записи за день…</div>'; this._bindTimeline(); return; }
+    const [w0, w1] = this._archWindow();
+    const span = w1 - w0;
+    const pct = (t) => ((t - w0) / span) * 100;
+    const segs = d.segments.filter((x) => x.e > w0 && x.s < w1).map((x) => {
+      const l = Math.max(0, pct(x.s)), r = Math.min(100, pct(x.e));
+      return `<div class="seg ${x.kind}" style="left:${l}%;width:${Math.max(0.15, r - l)}%" title="${SEG[x.kind] || x.kind} ${hm(x.s, true)}–${hm(x.e, true)}"></div>`;
+    }).join("");
+    const ticks = d.events.filter((e) => e.ts >= w0 && e.ts <= w1).map((e) =>
+      `<div class="evtick" style="left:${pct(e.ts)}%" title="${esc(TYPE[e.type] || e.type)} ${hm(e.ts, true)}"></div>`).join("");
+    const step = span > 12 * 3600 ? 7200 : span > 3 * 3600 ? 1800 : span > 1800 ? 600 : 60;
+    const labels = [];
+    for (let t = Math.ceil(w0 / step) * step; t <= w1; t += step) {
+      labels.push(`<span class="hl" style="left:${pct(t)}%">${hm(t)}</span>`);
+    }
+    const rec = d.segments.reduce((sum, x) => sum + (x.e - x.s), 0);
+    tl.innerHTML = head + `
+      <div class="track" title="Нажмите, чтобы смотреть с этого места">${segs}${ticks}
+        <div class="cur" style="left:${a.pos ? pct(a.pos) : -10}%" ${a.pos && a.pos >= w0 && a.pos <= w1 ? "" : "hidden"}></div></div>
+      <div class="hours">${labels.join("")}</div>
+      <div class="legend sub">
+        ${Object.entries(SEG).map(([k, l]) => `<span><i class="seg ${k}"></i>${l}</span>`).join("")}
+        <span><i class="evtick"></i>событие журнала</span>
+        <span class="grow"></span>
+        ${d.segments.length ? `записано за день ${Math.round(rec / 3600 * 10) / 10} ч` : '<b class="warn">за этот день записей нет</b>'}
+      </div>
+      ${a.err ? `<div class="warnbar">${esc(a.err)}</div>` : ""}`;
+    this._bindTimeline();
+  }
+
+  _bindTimeline() {
+    const a = this._arch, tl = this.shadowRoot.getElementById("tl");
+    if (!a || !tl) return;
+    const track = tl.querySelector(".track");
+    if (track) track.onclick = (ev) => {
+      ev.stopPropagation();
+      const r = track.getBoundingClientRect();
+      const [w0, w1] = this._archWindow();
+      this._archPlay(w0 + ((ev.clientX - r.left) / r.width) * (w1 - w0));
+    };
+    const date = tl.querySelector(".tldate");
+    if (date) date.onchange = (ev) => {
+      ev.stopPropagation();
+      if (!date.value) return;
+      a.day = date.value; a.center = null; a.play = null; a.pos = null; this._archLoad(); this._renderModal();
+    };
+    tl.querySelectorAll("[data-span]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      a.span = Number(b.dataset.span);
+      if (a.pos) a.center = a.pos;
+      this._renderTimeline();
+    }; });
+    tl.querySelectorAll("[data-arch]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      const k = b.dataset.arch;
+      if (k === "day-" || k === "day+") {
+        const d = new Date(`${a.day}T12:00:00`);
+        d.setDate(d.getDate() + (k === "day-" ? -1 : 1));
+        a.day = dayStr(d); a.center = null; a.play = null; a.pos = null; this._archLoad(); this._renderModal();
+        return;
+      }
+      if (!a.data) return;
+      if (k === "pan-" || k === "pan+") {
+        const [w0, w1] = this._archWindow();
+        a.center = (w0 + w1) / 2 + (k === "pan-" ? -1 : 1) * (w1 - w0) / 2;
+        this._renderTimeline();
+        return;
+      }
+      const marks = this._archMarks();
+      const at = a.pos || (k === "next" ? a.data.start : a.data.end);
+      const t = k === "next" ? marks.find((m) => m > at + 1) : [...marks].reverse().find((m) => m < at - 3);
+      if (t === undefined) { a.err = k === "next" ? "Дальше событий за этот день нет" : "Раньше событий за этот день нет"; this._renderTimeline(); return; }
+      a.center = t;
+      this._archPlay(Math.max(a.data.start, t - 5)); // a few seconds before the event
+    }; });
+  }
+
   // MP4 from the integration with the camera's sound re-encoded to AAC:
   // HA's HLS drops the G.711 audio these cameras send. Falls back to HLS
   // (silent) when ffmpeg cannot open the source or the browser cannot play it.
-  async _playAv(box, key, msg, fallback, wait) {
+  async _playAv(box, key, msg, fallback, wait, onVideo) {
     const host = () => this.shadowRoot && this.shadowRoot.getElementById("modal");
     const current = () => box.isConnected && host() && host().dataset.key === key;
     box.innerHTML = `<div class="noimg">${wait}</div>`;
@@ -514,11 +745,22 @@ class RaySharpNvrPanel extends HTMLElement {
       res = await this._hass.callWS({ type: "raysharp_nvr/av", ...msg, format: APPLE ? "hls" : "mp4" });
     } catch (e) {
       if (!current()) return;
-      if (e && e.code === "no_recording") { box.innerHTML = `<div class="noimg">${esc(e.message)}</div>`; return; }
+      if (!fallback || (e && e.code === "no_recording")) {
+        this._streamFail(box, e.message || e.code || String(e), msg.ts !== undefined);
+        return;
+      }
       fallback(); this._avNote(box, `🔇 видео без звука: ${e.message || e.code || e}`); return;
     }
     if (!current()) return;
     const v = document.createElement("video");
+    let playing = false;
+    v.addEventListener("playing", () => { playing = true; box.parentNode && box.parentNode.querySelectorAll(".warnbar.stall").forEach((n) => n.remove()); });
+    setTimeout(() => {
+      if (!playing && !done && current()) {
+        this._streamFail(box, `Поток не подключился за ${STALL_S} с — регистратор не отдаёт видео этого потока.`, msg.ts !== undefined, true);
+      }
+    }, STALL_S * 1000);
+    if (onVideo) onVideo(v, res);
     v.controls = true; v.autoplay = true; v.playsInline = true; v.muted = false;
     let done = false;
     v.addEventListener("error", () => {
@@ -526,6 +768,7 @@ class RaySharpNvrPanel extends HTMLElement {
       done = true;
       box.parentNode.querySelectorAll(".cliphint").forEach((n) => n.remove());
       const why = v.error ? `код ${v.error.code}${v.error.message ? `, ${v.error.message}` : ""}` : "";
+      if (!fallback) { this._streamFail(box, `Браузер не смог воспроизвести поток (${why}).`, msg.ts !== undefined); return; }
       fallback();
       this._avNote(box, `🔇 видео без звука: браузер не открыл поток со звуком (${why})`);
     }, { once: true });
@@ -553,6 +796,32 @@ class RaySharpNvrPanel extends HTMLElement {
       // Autoplay with sound refused: play muted, the controls unmute it.
       if (e && e.name === "NotAllowedError") { v.muted = true; v.play().catch(() => {}); }
     }
+  }
+
+  // "The stream did not connect" with what to do next: try again or another stream.
+  _streamFail(box, text, recording, stall = false) {
+    if (!box.isConnected) return;
+    const wrap = box.parentNode;
+    wrap.querySelectorAll(".warnbar.fail").forEach((n) => n.remove());
+    const cur = recording ? this._recProfile : this._profile;
+    const alt = (recording ? REC_PROFILES : PROFILES).filter(([p]) => p !== cur && p !== "auto");
+    const bar = document.createElement("div");
+    bar.className = `warnbar fail${stall ? " stall" : ""}`;
+    bar.innerHTML = `<div>⚠ <b>Поток не подключён.</b> ${esc(text)}</div>
+      <div class="acts"><button class="act" data-retry="1">Повторить</button>
+        ${alt.map(([p, l]) => `<button class="act" data-alt="${p}">Поток «${l}»</button>`).join("")}</div>`;
+    if (!stall) box.innerHTML = '<div class="noimg">нет видео</div>';
+    box.after(bar);
+    bar.querySelector("[data-retry]").onclick = (ev) => {
+      ev.stopPropagation();
+      const host = this.shadowRoot.getElementById("modal"); host.dataset.key = ""; this._renderModal();
+    };
+    bar.querySelectorAll("[data-alt]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      if (recording) { this._recProfile = b.dataset.alt; store.set("rec_profile", this._recProfile); }
+      else { this._profile = b.dataset.alt; store.set("profile", this._profile); }
+      this._renderModal();
+    }; });
   }
 
   _avNote(box, text) {
@@ -620,8 +889,16 @@ class RaySharpNvrPanel extends HTMLElement {
       if (b.dataset.do === "close-bg" && ev.target !== b) return;
       ev.stopPropagation();
       if (b.dataset.do === "close" || b.dataset.do === "close-bg") { this._open = null; this._renderModal(); }
-      if (b.dataset.do === "live") { this._open = { ...this._open, clip: null, until: null }; this._renderModal(); }
+      if (b.dataset.do === "live") { this._open = { ...this._open, clip: null, until: null, mode: "live" }; this._renderModal(); }
       if (b.dataset.do === "snap") this._act({ type: "raysharp_nvr/action", entry_id: n.entry_id, action: "snapshot", channel: ch.num }, "snap");
+    }; });
+    host.querySelectorAll("[data-mode]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      this._open = { ...this._open, clip: null, until: null, mode: b.dataset.mode }; this._renderModal();
+    }; });
+    host.querySelectorAll("[data-rprof]").forEach((b) => { b.onclick = (ev) => {
+      ev.stopPropagation();
+      this._recProfile = b.dataset.rprof; store.set("rec_profile", this._recProfile); this._renderModal();
     }; });
     host.querySelectorAll("[data-prof]").forEach((b) => { b.onclick = (ev) => {
       ev.stopPropagation();
@@ -629,7 +906,7 @@ class RaySharpNvrPanel extends HTMLElement {
     }; });
     host.querySelectorAll("[data-clip]").forEach((b) => { b.onclick = (ev) => {
       ev.stopPropagation();
-      this._open = { ...this._open, clip: Number(b.dataset.clip), until: b.dataset.end ? Number(b.dataset.end) : null };
+      this._open = { ...this._open, clip: Number(b.dataset.clip), until: b.dataset.end ? Number(b.dataset.end) : null, mode: "clip" };
       this._renderModal();
       host.querySelector(".sheet")?.scrollIntoView({ block: "start" });
     }; });
@@ -695,7 +972,30 @@ const STYLE = `
     --video-max-height: 100%; }
   .ovl { position: absolute; inset: 0; pointer-events: none; }
   .tile { display: block; }
-  .prof { margin-bottom: 8px; }
+  .prof { margin-bottom: 8px; align-items: center; }
+  .modes { margin-bottom: 6px; align-items: center; }
+  .warnbar { margin: 8px 0; padding: 8px 12px; border-radius: 8px; font-size: 13px;
+    border-left: 4px solid var(--warning-color, #ffa600); background: var(--secondary-background-color); }
+  .warnbar .acts { display:flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .tl { margin-top: 10px; }
+  .tlbar { display:flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .tlbar .sep { width: 6px; }
+  .tldate { padding: 4px 8px; border-radius: 8px; border: 1px solid var(--divider-color);
+    background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 13px; color-scheme: light dark; }
+  .track { position: relative; height: 34px; border-radius: 6px; background: var(--secondary-background-color); cursor: pointer; overflow: hidden; }
+  .seg { position: absolute; top: 0; bottom: 0; background: #607d8b; }
+  .seg.motion { background: #ff9800; top: 6px; bottom: 6px; }
+  .seg.smart { background: #e53935; top: 4px; bottom: 4px; }
+  .seg.pir { background: #8e24aa; top: 6px; bottom: 6px; }
+  .seg.io { background: #8e24aa; top: 6px; bottom: 6px; }
+  .evtick { position: absolute; top: 0; width: 2px; height: 10px; margin-left: -1px; background: #ffeb3b; }
+  .cur { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 3px #000; }
+  .hours { position: relative; height: 16px; font-size: 11px; color: var(--secondary-text-color); margin-top: 2px; }
+  .hours .hl { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+  .legend { display:flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 4px; }
+  .legend i { display:inline-block; position: static; width: 14px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  .legend i.evtick { width: 3px; height: 10px; }
+  .warn { color: var(--warning-color, #ffa600); }
   .noimg { width: 100%; height: 100%; display:flex; align-items:center; justify-content:center; color: #bbb; font-size: 13px; aspect-ratio: 16/9; background: #222; }
   .noimg.sm { aspect-ratio: 16/9; }
   .badge { position: absolute; left: 6px; top: 6px; background: var(--error-color, #c62828); color: #fff; font-size: 12px; font-weight: 600;

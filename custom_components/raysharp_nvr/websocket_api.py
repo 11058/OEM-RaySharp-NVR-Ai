@@ -263,6 +263,9 @@ async def ws_action(hass: HomeAssistant, connection, msg: dict) -> None:
 
 CLIP_BEFORE_S = 10
 CLIP_AFTER_S = 30
+ARCHIVE_CHUNK_S = 600  # the timeline plays the archive in 10-minute pieces
+SUBTYPE = {"main": 0, "sub": 1, "mobile": 2}
+PROFILE_RU = {"main": "Основной", "sub": "Дополнительный", "mobile": "Мобильный"}
 CLIP_LIFETIME_S = 240
 _CLIPS = f"{DOMAIN}_clips"
 
@@ -278,7 +281,9 @@ PLAYBACK_VARIANTS = (
 _VARIANT = f"{DOMAIN}_playback_variant"
 
 
-def playback_url(live: str, start: float, end: float, variant: str = "iso-utc") -> str | None:
+def playback_url(
+    live: str, start: float, end: float, variant: str = "iso-utc", subtype: int = 0
+) -> str | None:
     """Live RTSP URL of a channel -> the NVR's playback URL for a time window.
 
     RaySharp firmware serves recordings at /rtsp/playback with the same query
@@ -301,7 +306,7 @@ def playback_url(live: str, start: float, end: float, variant: str = "iso-utc") 
     url = live.replace("/rtsp/streaming", "/rtsp/playback", 1)
     # NVRs record the main stream only: asking for the recording of the sub
     # or mobile stream (what the grid shows) returns a session without video.
-    url = re.sub(r"([?&])subtype=\d+", r"\g<1>subtype=0", url)
+    url = re.sub(r"([?&])subtype=\d+", rf"\g<1>subtype={int(subtype)}", url)
     return f"{url}{'&' if '?' in url else '?'}starttime={t0}&endtime={t1}"
 
 
@@ -411,13 +416,14 @@ def _flat_ts(hass: HomeAssistant, camera: str) -> bool:
 
 
 async def _playback_source(
-    hass: HomeAssistant, camera: str, live: str, ts: float, end: float | None = None
+    hass: HomeAssistant, camera: str, live: str, ts: float, end: float | None = None,
+    *, before: float = CLIP_BEFORE_S, subtype: int = 0,
 ) -> str | None:
     """Find (once per camera) which port and time form the NVR answers with video."""
     from urllib.parse import urlparse  # noqa: PLC0415
 
     known: dict = hass.data.setdefault(_VARIANT, {})
-    start, end = ts - CLIP_BEFORE_S, end or ts + CLIP_AFTER_S
+    start, end = ts - before, end or ts + CLIP_AFTER_S
     bases = _playback_bases(live)
     if camera in known:
         port, variant = known[camera]
@@ -430,7 +436,7 @@ async def _playback_source(
     for base, variant in order:
         if base in skip:
             continue
-        url = playback_url(base, start, end, variant)
+        url = playback_url(base, start, end, variant, subtype)
         why = await hass.async_add_executor_job(_probe, url) if url else "нет адреса"
         port = urlparse(base).port or 554
         if not why:
@@ -444,7 +450,9 @@ async def _playback_source(
             skip.add(base)
     if camera in known:  # remembered form stopped working: search again
         known.pop(camera)
-        return await _playback_source(hass, camera, live, ts, end)
+        return await _playback_source(
+            hass, camera, live, ts, end, before=before, subtype=subtype
+        )
     return None
 
 
@@ -666,6 +674,8 @@ async def ws_probe_playback(hass: HomeAssistant, connection, msg: dict) -> None:
         vol.Optional("ts"): vol.Coerce(float),
         vol.Optional("until"): vol.Coerce(float),
         vol.Optional("format", default="mp4"): vol.In(["mp4", "hls"]),
+        # Archive (timeline): start exactly at ts, not CLIP_BEFORE_S earlier.
+        vol.Optional("exact", default=False): bool,
     }
 )
 @websocket_api.async_response
@@ -699,24 +709,98 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         connection.send_error(msg["id"], "unsupported", "NVR не отдаёт запись по RTSP")
         return
     ts = msg["ts"]
+    before = 0 if msg["exact"] else CLIP_BEFORE_S
     end = None
     if msg.get("until") and msg["until"] > ts:
-        end = min(msg["until"] + 5, ts + 600)
-    url = await _playback_source(hass, msg["camera"], live, ts, end)
+        end = min(msg["until"] + (0 if msg["exact"] else 5), ts + ARCHIVE_CHUNK_S)
+    subtype = SUBTYPE[msg["profile"]]
+    url = await _playback_source(
+        hass, msg["camera"], live, ts, end, before=before, subtype=subtype
+    )
     if not url:
-        connection.send_error(
-            msg["id"], "no_recording",
-            "Регистратор не отдал запись за это время: "
-            + "; ".join(hass.data.get(f"{DOMAIN}_clip_reasons", {}).get(msg["camera"], [])),
-        )  # fmt: skip
+        reasons = hass.data.get(f"{DOMAIN}_clip_reasons", {}).get(msg["camera"], [])
+        text = "Регистратор не отдал запись за это время: " + "; ".join(reasons)
+        if subtype:
+            text = (
+                f"Запись потока «{PROFILE_RU[msg['profile']]}» регистратор не отдаёт — "
+                "обычно он пишет только основной поток. Выберите «Основной». "
+                + text
+            )
+        connection.send_error(msg["id"], "no_recording", text)
         return
-    duration = (end or ts + CLIP_AFTER_S) - (ts - CLIP_BEFORE_S)
+    duration = (end or ts + CLIP_AFTER_S) - (ts - before)
     vcodec, audio = await _codecs_of(hass, msg["camera"], "main", live)
     token = new_token(hass, url, duration, vcodec, wallclock=_flat_ts(hass, msg["camera"]))
     connection.send_result(msg["id"], {
         "audio": audio, "video": vcodec, "url": _url(token),
-        "before": CLIP_BEFORE_S, "after": int(end - ts) if end else CLIP_AFTER_S,
+        "before": before, "after": int(end - ts) if end else CLIP_AFTER_S,
+        "start": ts - before, "duration": duration,
     })
+
+
+def _record_rows(resp_data: dict[str, Any]):
+    for group in resp_data.get("record") or []:
+        yield from (r for r in (group if isinstance(group, list) else [group]) if isinstance(r, dict))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/timeline",
+        vol.Required("camera"): str,
+        vol.Required("day"): str,  # YYYY-MM-DD, the NVR's local day
+    }
+)
+@websocket_api.async_response
+async def ws_timeline(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Recordings of one camera for one day, with motion/AI pieces and the
+    journal's events, for the archive timeline. Read-only."""
+    from datetime import date, datetime, timedelta  # noqa: PLC0415
+
+    from .const import API_RECORD_SEARCH  # noqa: PLC0415
+
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    try:
+        day = date.fromisoformat(msg["day"])
+    except ValueError:
+        connection.send_error(msg["id"], "bad_day", "Неверная дата")
+        return
+    coord = cam.coordinator
+    num = cam._channel_num  # noqa: SLF001
+    since = datetime.combine(day, datetime.min.time())
+    until = since + timedelta(days=1) - timedelta(seconds=1)
+    try:
+        resp = await coord.client.async_api_call(
+            API_RECORD_SEARCH,
+            {
+                "channel": [f"CH{num}"],
+                "start_date": since.strftime("%m/%d/%Y"),
+                "start_time": since.strftime("%H:%M:%S"),
+                "end_date": until.strftime("%m/%d/%Y"),
+                "end_time": until.strftime("%H:%M:%S"),
+                "record_type": 4294967295,
+                "smart_region": [],
+                "enable_smart_search": 0,
+            },
+        )
+    except Exception as err:  # noqa: BLE001 - shown in the panel
+        connection.send_error(msg["id"], "search_failed", f"Поиск записей не удался: {err}")
+        return
+    from .events import timeline_segments  # noqa: PLC0415
+
+    segments = timeline_segments(_record_rows(coord._extract_data(resp)), num)  # noqa: SLF001
+    t0, t1 = since.timestamp(), until.timestamp() + 1
+    events = [
+        {"id": e["id"], "ts": e["ts"], "type": e["type"], "picture": e.get("picture", False)}
+        for e in get_event_log(hass).events
+        if e.get("channel") == num and t0 <= e["ts"] < t1
+    ]
+    connection.send_result(
+        msg["id"],
+        {"day": msg["day"], "start": t0, "end": t1, "segments": segments, "events": events},
+    )
 
 
 @callback
@@ -724,7 +808,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
 
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
-                    ws_stream, ws_api, ws_probe_playback, ws_av):  # fmt: skip
+                    ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))
