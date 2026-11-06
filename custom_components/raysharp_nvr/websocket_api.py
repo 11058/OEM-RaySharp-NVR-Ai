@@ -803,12 +803,46 @@ async def ws_timeline(hass: HomeAssistant, connection, msg: dict) -> None:
     )
 
 
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/talk_probe",
+        vol.Required("camera"): str,
+        vol.Optional("profile", default="main"): vol.In(["main", "sub", "mobile"]),
+        vol.Optional("url"): str,  # another RTSP source, e.g. the door panel itself
+    }
+)
+@websocket_api.async_response
+async def ws_talk_probe(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Diagnostics for two-way audio: does the RTSP source offer an ONVIF audio
+    back-channel? With `url`, the camera's own login is used for that host."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    from .talk_probe import probe  # noqa: PLC0415
+
+    cam = _raysharp_camera(hass, msg["camera"])
+    urls = cam.profile_urls() if cam is not None and hasattr(cam, "profile_urls") else {}
+    live = urls.get(msg["profile"], "") or (await cam.stream_source() if cam else "") or ""
+    if not live.startswith("rtsp://"):
+        connection.send_error(msg["id"], "no_stream", "Нет RTSP-адреса")
+        return
+    url = live
+    if msg.get("url"):
+        own = urlparse(live)
+        other = urlparse(msg["url"])
+        cred = f"{own.username}:{own.password}@" if own.username else ""
+        url = f"rtsp://{cred}{other.hostname}:{other.port or 554}{other.path}{'?' + other.query if other.query else ''}"
+    result = await probe(url)
+    result["source"] = (urlparse(url).hostname or "") + ":" + str(urlparse(url).port or 554)
+    connection.send_result(msg["id"], result)
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
 
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
-                    ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline):  # fmt: skip
+                    ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))
