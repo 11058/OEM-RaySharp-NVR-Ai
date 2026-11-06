@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 import voluptuous as vol
@@ -297,7 +299,13 @@ def playback_url(live: str, start: float, end: float, variant: str = "iso-utc") 
         t0 = dt.datetime.fromtimestamp(start).strftime(fmt)
         t1 = dt.datetime.fromtimestamp(end).strftime(fmt)
     url = live.replace("/rtsp/streaming", "/rtsp/playback", 1)
+    # NVRs record the main stream only: asking for the recording of the sub
+    # or mobile stream (what the grid shows) returns a session without video.
+    url = re.sub(r"([?&])subtype=\d+", r"\g<1>subtype=0", url)
     return f"{url}{'&' if '?' in url else '?'}starttime={t0}&endtime={t1}"
+
+
+FLAT_TS: set[str] = set()  # playback URLs whose frames all share one timestamp
 
 
 def _probe(url: str, timeout: float = 12) -> str:
@@ -312,12 +320,23 @@ def _probe(url: str, timeout: float = 12) -> str:
         ) as box:
             if not box.streams.video:
                 return "нет видеодорожки"
+            seen: set = set()
+            frames = 0
             for n, packet in enumerate(box.demux(box.streams.video[0])):
                 if packet.size:
-                    return ""
-                if n > 50:
+                    frames += 1
+                    seen.add(packet.pts)
+                    if frames >= 12:
+                        break
+                if n > 80:
                     break
-            return "поток пустой"
+            if not frames:
+                return "поток пустой"
+            # Some firmware (V8.2.4) sends recordings with every frame stamped
+            # the same: players stall on them. Re-time those by arrival.
+            if frames >= 12 and len(seen) <= 1:
+                FLAT_TS.add(url)
+            return ""
     except Exception as err:  # noqa: BLE001 - reported, not raised
         return str(err).replace(url, "<url>")[:120] or type(err).__name__
 
@@ -387,6 +406,10 @@ def _port_dead(why: str) -> bool:
     return any(s in w for s in ("refused", "timed out", "timeout", "unreachable", "no route"))
 
 
+def _flat_ts(hass: HomeAssistant, camera: str) -> bool:
+    return camera in hass.data.get(f"{DOMAIN}_flat_ts", set())
+
+
 async def _playback_source(
     hass: HomeAssistant, camera: str, live: str, ts: float, end: float | None = None
 ) -> str | None:
@@ -412,6 +435,9 @@ async def _playback_source(
         port = urlparse(base).port or 554
         if not why:
             known[camera] = (port, variant)
+            flat = hass.data.setdefault(f"{DOMAIN}_flat_ts", set())
+            if url in FLAT_TS:
+                flat.add(camera)
             return url
         reasons[camera].append(f"{port}/{variant}: {why}")
         if _port_dead(why):
@@ -461,8 +487,11 @@ async def ws_clip(hass: HomeAssistant, connection, msg: dict) -> None:
     stream = clips.get(key)
     if stream is None:
         try:
+            options = dict(getattr(cam, "stream_options", None) or {})
+            if _flat_ts(hass, msg["camera"]):
+                options["use_wallclock_as_timestamps"] = True
             stream = create_stream(
-                hass, url, dict(getattr(cam, "stream_options", None) or {}),
+                hass, url, options,
                 DynamicStreamSettings(), stream_label=f"{msg['camera']} clip",
             )  # fmt: skip
             stream.add_provider("hls")
@@ -683,7 +712,7 @@ async def ws_av(hass: HomeAssistant, connection, msg: dict) -> None:
         return
     duration = (end or ts + CLIP_AFTER_S) - (ts - CLIP_BEFORE_S)
     vcodec, audio = await _codecs_of(hass, msg["camera"], "main", live)
-    token = new_token(hass, url, duration, vcodec)
+    token = new_token(hass, url, duration, vcodec, wallclock=_flat_ts(hass, msg["camera"]))
     connection.send_result(msg["id"], {
         "audio": audio, "video": vcodec, "url": _url(token),
         "before": CLIP_BEFORE_S, "after": int(end - ts) if end else CLIP_AFTER_S,

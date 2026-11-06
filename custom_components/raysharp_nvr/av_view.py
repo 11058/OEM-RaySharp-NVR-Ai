@@ -32,7 +32,8 @@ URL_BASE = "/api/raysharp_nvr/av"
 
 
 def new_token(
-    hass: HomeAssistant, source: str, duration: float | None, vcodec: str = ""
+    hass: HomeAssistant, source: str, duration: float | None, vcodec: str = "",
+    *, wallclock: bool = False,
 ) -> str:
     tokens: dict[str, dict[str, Any]] = hass.data.setdefault(_TOKENS, {})
     now = time.monotonic()
@@ -43,6 +44,7 @@ def new_token(
     token = secrets.token_urlsafe(16)
     tokens[token] = {
         "source": source, "duration": duration, "vcodec": vcodec, "expires": now + TOKEN_TTL_S,
+        "wallclock": wallclock,
     }
     return token
 
@@ -54,6 +56,11 @@ def signed_url(hass: HomeAssistant, token: str, refresh_token_id: str | None) ->
         hass, f"{URL_BASE}/{token}", timedelta(seconds=TOKEN_TTL_S),
         refresh_token_id=refresh_token_id,
     )  # fmt: skip
+
+
+def _retime(entry: dict) -> list[str]:
+    """Input options for recordings whose frames all carry one timestamp."""
+    return ["-use_wallclock_as_timestamps", "1"] if entry.get("wallclock") else []
 
 
 def _ffmpeg_binary(hass: HomeAssistant) -> str:
@@ -100,7 +107,7 @@ class RaySharpAvView(HomeAssistantView):
         cmd = [
             _ffmpeg_binary(self.hass), "-hide_banner", "-loglevel", "error",
             "-rtsp_transport", "tcp", "-timeout", "15000000",
-            "-i", entry["source"],
+            *_retime(entry), "-i", entry["source"],
             "-map", "0:v:0", "-map", "0:a:0?",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "64k", "-ar", "16000", "-ac", "1",
             "-t", str(int(duration) if duration else MAX_LIVE_S),
@@ -189,7 +196,7 @@ async def _start_hls(hass: HomeAssistant, token: str, entry: dict) -> dict:
     cmd = [
         _ffmpeg_binary(hass), "-hide_banner", "-loglevel", "error",
         "-rtsp_transport", "tcp", "-timeout", "15000000",
-        "-i", entry["source"],
+        *_retime(entry), "-i", entry["source"],
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "copy", *tag, "-c:a", "aac", "-b:a", "64k", "-ar", "16000", "-ac", "1",
         "-t", str(int(duration) if duration else MAX_LIVE_S),
