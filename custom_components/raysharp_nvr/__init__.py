@@ -1574,5 +1574,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_update_listener(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
-    """Handle options update."""
-    await hass.config_entries.async_reload(entry.entry_id)
+    """Options changed: reload (scheduled — awaiting a reload inside the
+    listener stops working in HA 2026.12)."""
+    hass.config_entries.async_schedule_reload(entry.entry_id)
