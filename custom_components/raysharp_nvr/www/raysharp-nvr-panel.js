@@ -32,6 +32,14 @@ function loadPeriod() {
   try { const v = Number(localStorage.getItem("raysharp_nvr_period")); if (PERIODS.some(([p]) => p === v)) return v; } catch (e) {}
   return 86400;
 }
+// The NVR reports binary GB (GiB). Shown in one unit, rounded the way disks are
+// sold: an "8 TB" disk is 7452 GiB = 7.3 TiB; free space in the same unit.
+function size(gib) {
+  if (gib === null || gib === undefined) return "?";
+  const n = Number(gib);
+  if (n >= 1024) return `${(n / 1024).toLocaleString("ru-RU", { maximumFractionDigits: 1 })} ТБ`;
+  return `${Math.round(n).toLocaleString("ru-RU")} ГБ`;
+}
 function hhmm(ts) {
   const d = new Date(ts * 1000);
   const t = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -300,7 +308,7 @@ class RaySharpNvrPanel extends HTMLElement {
       const label = cycling ? "заполнен, запись идёт поверх старой" : st;
       return `<div class="disk"><span class="sub">Диск ${i + 1}</span>
         <div class="bar"><div style="width:${used}%"></div></div>
-        <span class="sub ${ok ? "" : "bad"}">${d.total_gb ? `${(d.total_gb / 1024).toFixed(1)} ТБ${cycling ? "" : `, свободно ${d.free_gb} ГБ`}` : ""} · ${esc(label)}</span></div>`;
+        <span class="sub ${ok ? "" : "bad"}">${d.total_gb ? `${size(d.total_gb)}${cycling ? "" : `, свободно ${size(d.free_gb)}`}` : ""} · ${esc(label)}</span></div>`;
     }).join("");
     const armed = n.armed === "on";
     const ai = n.ai_today || {};
