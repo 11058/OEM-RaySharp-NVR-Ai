@@ -644,7 +644,10 @@ async def ws_stream(hass: HomeAssistant, connection, msg: dict) -> None:
 
 
 # Read-only NVR calls for diagnosing firmware differences from the panel side.
-_RAW_ALLOWED = ("/API/Playback/", "/API/AI/", "/API/Event/", "/API/Log/")
+_RAW_ALLOWED = (
+    "/API/Playback/", "/API/AI/", "/API/Event/", "/API/Log/",
+    "/API/AlarmConfig/", "/API/SystemConfig/", "/API/SystemInfo/", "/API/ChannelConfig/",
+)
 
 
 @websocket_api.require_admin

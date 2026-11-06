@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
 from .coordinator import RaySharpNVRCoordinator
 
-TO_REDACT = {CONF_USERNAME, CONF_PASSWORD, "password", "username"}
+TO_REDACT = {CONF_USERNAME, CONF_PASSWORD, "password", "username", "talk_password", "talk_username"}
 
 # Base64 images and long record lists make the dump unreadable and huge.
 _MAX_STR = 200
@@ -53,7 +53,7 @@ async def async_get_config_entry_diagnostics(
     diag: dict[str, Any] = {
         "entry": {
             "data": async_redact_data(dict(entry.data), TO_REDACT),
-            "options": dict(entry.options),
+            "options": async_redact_data(dict(entry.options), TO_REDACT),
             "state": str(entry.state),
         }
     }
