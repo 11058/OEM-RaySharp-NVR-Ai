@@ -786,7 +786,7 @@ class RaySharpNvrPanel extends HTMLElement {
     }, { once: true });
     v.src = this._hass.hassUrl ? this._hass.hassUrl(res.url) : res.url;
     box.innerHTML = ""; box.appendChild(v);
-    if (res.before !== undefined) {
+    if (res.before !== undefined && !msg.exact) {
       const note = document.createElement("div");
       note.className = "sub cliphint";
       note.textContent = `Отрывок: ${res.before} с до и ${res.after} с после события. Запись с регистратора подгружается несколько секунд.`;
