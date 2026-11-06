@@ -91,6 +91,17 @@ def search_window(since: float, until: float) -> dict[str, str]:
     return {"start_date": d0, "start_time": t0, "end_date": d1, "end_time": t1}
 
 
+def offset_from_zone(zone: str) -> float | None:
+    """'GMT+5:00', 'GMT-3:30', 'UTC+8' (SystemConfig/DateTime time_zone) -> seconds."""
+    import re as _re  # noqa: PLC0415
+
+    m = _re.match(r"^\s*(?:GMT|UTC)?\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\s*$", str(zone or ""))
+    if not m:
+        return 0.0 if str(zone or "").strip().upper() in ("GMT", "UTC") else None
+    sign = -1 if m.group(1) == "-" else 1
+    return sign * (int(m.group(2)) * 3600 + int(m.group(3) or 0) * 60)
+
+
 def offset_from_date_header(value: str, now: float | None = None) -> float | None:
     """RTSP/HTTP 'Date: Fri, 06 Nov 2026 16:14:34 GMT' from a RaySharp NVR is its
     WALL clock labelled GMT: minus the real time it gives the NVR's UTC offset."""

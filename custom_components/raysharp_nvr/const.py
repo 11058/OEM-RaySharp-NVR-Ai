@@ -39,7 +39,7 @@ API_CHANNEL_INFO = "/API/Login/ChannelInfo/Get"
 
 # ─── System Config ─────────────────────────────────────────────────────────────
 API_SYSTEM_GENERAL = "/API/System/General/Get"
-API_DATE_TIME = "/API/System/Date&Time/Get"
+API_DATE_TIME = "/API/SystemConfig/DateTime/Get"  # was "/API/System/Date&Time/Get" (empty on V8.2.7)
 API_SYSTEM_INFO = "/API/SystemInfo/Base/Get"
 API_NETWORK_STATE = "/API/SystemInfo/Network/Get"
 API_RECORD_INFO = "/API/SystemInfo/Record/Get"

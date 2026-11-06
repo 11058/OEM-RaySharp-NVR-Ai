@@ -265,6 +265,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.record_flags: dict[int, bool] = {}
         self.nvr_offset_s: float | None = None  # NVR wall clock minus UTC
         self.clock_skew_s: float | None = None  # newest recording end minus HA's now
+        self._clock_task = None
         self.snapshot_errors: dict[int, str] = {}
         self.channel_abilities: dict[int, list[str]] = {}
         self._ec_errors = 0
@@ -640,6 +641,10 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raise
             except Exception as err:  # noqa: BLE001 - keep trying
                 _LOGGER.debug("NVR clock: %s", err)
+            if self._clock_task is None or self._clock_task.done():
+                self._clock_task = self.config_entry.async_create_background_task(
+                    self.hass, self._async_clock_loop(), "raysharp_nvr clock"
+                )
             try:
                 await self._async_archive_bounds()
             except asyncio.CancelledError:
@@ -647,6 +652,17 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:  # noqa: BLE001 - keep trying
                 _LOGGER.debug("Archive bounds failed: %s", err)
             await asyncio.sleep(3600)
+
+    async def _async_clock_loop(self) -> None:
+        """The NVR's time zone every 5 minutes: someone may change it."""
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await self._async_learn_clock()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - keep trying
+                _LOGGER.debug("NVR clock: %s", err)
 
     async def _async_learn_clock(self) -> None:
         """The NVR's UTC offset from the Date of an RTSP OPTIONS answer (its
@@ -657,7 +673,21 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         import time as _time  # noqa: PLC0415
         from urllib.parse import urlparse  # noqa: PLC0415
 
-        from .events import offset_from_date_header, set_nvr_offset  # noqa: PLC0415
+        from .events import offset_from_date_header, offset_from_zone, set_nvr_offset  # noqa: PLC0415
+
+        # The NVR's own setting: exact, and it follows a time zone change at once.
+        try:
+            resp = await self.client.async_api_call(API_DATE_TIME, {})
+            zone = (self._extract_data(resp) or {}).get("time_zone")
+            off = offset_from_zone(zone) if zone else None
+        except Exception:  # noqa: BLE001 - older firmware: fall back to the Date header
+            off = None
+        if off is not None:
+            if off != self.nvr_offset_s:
+                _LOGGER.info("NVR clock: %s", zone)
+            self.nvr_offset_s = off
+            set_nvr_offset(off)
+            return
 
         text = str((self.data or {}).get(DATA_RTSP_URLS) or "")
         m = _re.search(r"rtsp://[^\s'\"]+", text)

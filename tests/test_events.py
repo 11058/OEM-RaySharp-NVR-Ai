@@ -233,3 +233,12 @@ def test_nvr_clock_conversion_any_zone():
         assert events.offset_from_date_header("Fri, 06 Nov 2026 13:14:40 GMT", now) == 5 * 3600
     finally:
         events.set_nvr_offset(None)
+
+
+def test_offset_from_zone():
+    assert events.offset_from_zone("GMT+5:00") == 5 * 3600
+    assert events.offset_from_zone("GMT+8:00") == 8 * 3600
+    assert events.offset_from_zone("GMT-3:30") == -(3 * 3600 + 1800)
+    assert events.offset_from_zone("UTC+05:45") == 5 * 3600 + 2700
+    assert events.offset_from_zone("GMT") == 0
+    assert events.offset_from_zone("Europe/Moscow") is None
