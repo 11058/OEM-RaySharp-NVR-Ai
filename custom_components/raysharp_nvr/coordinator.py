@@ -678,15 +678,28 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The NVR's own setting: exact, and it follows a time zone change at once.
         try:
             resp = await self.client.async_api_call(API_DATE_TIME, {})
-            zone = (self._extract_data(resp) or {}).get("time_zone")
+            info = self._extract_data(resp) or {}
+            zone = info.get("time_zone")
             off = offset_from_zone(zone) if zone else None
         except Exception:  # noqa: BLE001 - older firmware: fall back to the Date header
-            off = None
+            info, off = {}, None
         if off is not None:
             if off != self.nvr_offset_s:
                 _LOGGER.info("NVR clock: %s", zone)
             self.nvr_offset_s = off
             set_nvr_offset(off)
+            # Is the clock itself right (NTP)? Its wall time minus its zone vs now.
+            fmt = {"DD/MM/YYYY": "%d/%m/%Y", "MM/DD/YYYY": "%m/%d/%Y", "YYYY/MM/DD": "%Y/%m/%d",
+                   "YYYY-MM-DD": "%Y-%m-%d"}.get(str(info.get("date_format") or "").upper(), "%d/%m/%Y")
+            try:
+                wall = datetime.strptime(f"{info['date']} {info['time']}", f"{fmt} %H:%M:%S")
+                import datetime as _dt  # noqa: PLC0415
+
+                real = wall.replace(tzinfo=_dt.UTC).timestamp() - off
+                self.clock_skew_s = real - _time.time()
+                self._skew_from_api = True
+            except (KeyError, ValueError):
+                pass
             return
 
         text = str((self.data or {}).get(DATA_RTSP_URLS) or "")
@@ -761,9 +774,11 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     latest = max(latest, end)
                 except (KeyError, ValueError):
                     pass
-        # The newest recording ends "now" by the NVR's clock: far from HA's
-        # now means the NVR's clock or time zone is off.
-        self.clock_skew_s = latest - now.timestamp() if latest else None
+        # Without the DateTime API: the newest recording ends "now" by the NVR's
+        # clock, so a big gap means its clock is off. Recordings labelled under
+        # an older time zone can sit "in the future" — only a fallback.
+        if getattr(self, "_skew_from_api", False) is False and latest:
+            self.clock_skew_s = latest - now.timestamp()
         # A channel with nothing recorded in the window has no archive at all.
         for n in channels:
             log.archive_start[n] = first.get(n, now.timestamp())

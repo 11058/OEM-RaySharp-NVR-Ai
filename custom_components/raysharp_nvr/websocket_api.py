@@ -832,6 +832,12 @@ async def ws_timeline(hass: HomeAssistant, connection, msg: dict) -> None:
     from .events import timeline_segments  # noqa: PLC0415
 
     segments = timeline_segments(_record_rows(coord._extract_data(resp)), num)  # noqa: SLF001
+    # Recordings "from the future" were labelled under an older NVR time zone
+    # (the zone was changed later): they cannot be placed on the day, hide them.
+    import time as _time  # noqa: PLC0415
+
+    future = [x for x in segments if x["s"] > _time.time() + 300]
+    segments = [x for x in segments if x["s"] <= _time.time() + 300]
     t0, t1 = since.timestamp(), until.timestamp() + 1
     events = [
         {"id": e["id"], "ts": e["ts"], "type": e["type"], "picture": e.get("picture", False)}
@@ -840,7 +846,8 @@ async def ws_timeline(hass: HomeAssistant, connection, msg: dict) -> None:
     ]
     connection.send_result(
         msg["id"],
-        {"day": msg["day"], "start": t0, "end": t1, "segments": segments, "events": events},
+        {"day": msg["day"], "start": t0, "end": t1, "segments": segments, "events": events,
+         "future": len(future)},
     )
 
 
