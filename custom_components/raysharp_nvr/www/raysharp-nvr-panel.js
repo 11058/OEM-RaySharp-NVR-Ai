@@ -485,7 +485,8 @@ class RaySharpNvrPanel extends HTMLElement {
       // Keep the playing video; refresh only what is around it.
       const info = host.querySelector("#info");
       if (info) info.innerHTML = this._modalInfo(n, ch, act, evs);
-      this._renderTimeline();
+      // Repaint only the track: rebuilding it would cut a drag or pinch short.
+      if (host.querySelector("#tl .track")) this._paintTrack(); else this._renderTimeline();
       this._bindModal(host, n, ch);
       return;
     }
@@ -618,13 +619,11 @@ class RaySharpNvrPanel extends HTMLElement {
     if (!a || !a.video || !a.chunk || !a.video.isConnected) return;
     a.pos = a.chunk.start + (a.video.currentTime || 0);
     const d = a.data;
-    if (d && a.span < 86400) {
+    if (d && a.span < d.end - d.start && Date.now() - (a.userAt || 0) > 8000) {
       const [w0, w1] = this._archWindow();
-      if (a.pos > w1 - (w1 - w0) * 0.05) a.center = a.pos + (w1 - w0) * 0.4; // follow the playhead
-      else { this._moveCursor(); return; }
+      if (a.pos > w1 - (w1 - w0) * 0.05) { a.center = a.pos + (w1 - w0) * 0.4; this._paintTrack(); return; } // follow the playhead
     }
-    if (a.span >= 86400) { this._moveCursor(); return; }
-    this._renderTimeline();
+    this._moveCursor();
   }
 
   _moveCursor() {
@@ -634,6 +633,46 @@ class RaySharpNvrPanel extends HTMLElement {
     const [w0, w1] = this._archWindow();
     if (cur && a.pos) { cur.style.left = `${((a.pos - w0) / (w1 - w0)) * 100}%`; cur.hidden = a.pos < w0 || a.pos > w1; }
     if (lab && a.pos) lab.textContent = hm(a.pos, true);
+  }
+
+  // Segments, event ticks, playhead and hour labels for the visible window.
+  _trackParts() {
+    const a = this._arch, d = a.data;
+    const [w0, w1] = this._archWindow();
+    const span = w1 - w0;
+    const pct = (t) => ((t - w0) / span) * 100;
+    const segs = d.segments.filter((x) => x.e > w0 && x.s < w1).map((x) => {
+      const l = Math.max(0, pct(x.s)), r = Math.min(100, pct(x.e));
+      return `<div class="seg ${x.kind}" style="left:${l}%;width:${Math.max(0.15, r - l)}%" title="${SEG[x.kind] || x.kind} ${hm(x.s, true)}–${hm(x.e, true)}"></div>`;
+    }).join("");
+    const ticks = d.events.filter((e) => e.ts >= w0 && e.ts <= w1).map((e) =>
+      `<div class="evtick" style="left:${pct(e.ts)}%" title="${esc(TYPE[e.type] || e.type)} ${hm(e.ts, true)}"></div>`).join("");
+    const step = [60, 300, 600, 1800, 3600, 7200, 10800].find((st) => span / st <= 12) || 10800;
+    const labels = [];
+    for (let t = Math.ceil(w0 / step) * step; t <= w1; t += step) {
+      labels.push(`<span class="hl" style="left:${pct(t)}%">${hm(t)}</span>`);
+    }
+    const cur = `<div class="cur" style="left:${a.pos ? pct(a.pos) : -10}%" ${a.pos && a.pos >= w0 && a.pos <= w1 ? "" : "hidden"}></div>`;
+    return { inner: segs + ticks + cur, labels: labels.join("") };
+  }
+
+  _paintTrack() {
+    const a = this._arch, tl = this.shadowRoot.getElementById("tl");
+    const track = tl && tl.querySelector(".track"), hours = tl && tl.querySelector(".hours");
+    if (!a || !a.data || !track || !hours) return;
+    const { inner, labels } = this._trackParts();
+    track.innerHTML = inner; hours.innerHTML = labels;
+    tl.querySelectorAll("[data-span]").forEach((b) => b.classList.toggle("on", Number(b.dataset.span) === a.span));
+  }
+
+  // Zoom keeping the moment under the finger/cursor where it is.
+  _zoomTo(span, anchor, frac) {
+    const a = this._arch, d = a.data;
+    span = Math.max(120, Math.min(d.end - d.start, span));
+    a.span = span;
+    a.center = anchor - frac * span + span / 2;
+    a.userAt = Date.now();
+    this._paintTrack();
   }
 
   _renderTimeline() {
@@ -657,45 +696,92 @@ class RaySharpNvrPanel extends HTMLElement {
       </div>`;
     if (a.err && !d) { tl.innerHTML = head + `<div class="warnbar">${esc(a.err)}</div>`; this._bindTimeline(); return; }
     if (!d) { tl.innerHTML = head + '<div class="sub">Ищу записи за день…</div>'; this._bindTimeline(); return; }
-    const [w0, w1] = this._archWindow();
-    const span = w1 - w0;
-    const pct = (t) => ((t - w0) / span) * 100;
-    const segs = d.segments.filter((x) => x.e > w0 && x.s < w1).map((x) => {
-      const l = Math.max(0, pct(x.s)), r = Math.min(100, pct(x.e));
-      return `<div class="seg ${x.kind}" style="left:${l}%;width:${Math.max(0.15, r - l)}%" title="${SEG[x.kind] || x.kind} ${hm(x.s, true)}–${hm(x.e, true)}"></div>`;
-    }).join("");
-    const ticks = d.events.filter((e) => e.ts >= w0 && e.ts <= w1).map((e) =>
-      `<div class="evtick" style="left:${pct(e.ts)}%" title="${esc(TYPE[e.type] || e.type)} ${hm(e.ts, true)}"></div>`).join("");
-    const step = span > 12 * 3600 ? 7200 : span > 3 * 3600 ? 1800 : span > 1800 ? 600 : 60;
-    const labels = [];
-    for (let t = Math.ceil(w0 / step) * step; t <= w1; t += step) {
-      labels.push(`<span class="hl" style="left:${pct(t)}%">${hm(t)}</span>`);
-    }
+    const { inner, labels } = this._trackParts();
     const rec = d.segments.reduce((sum, x) => sum + (x.e - x.s), 0);
     tl.innerHTML = head + `
-      <div class="track" title="Нажмите, чтобы смотреть с этого места">${segs}${ticks}
-        <div class="cur" style="left:${a.pos ? pct(a.pos) : -10}%" ${a.pos && a.pos >= w0 && a.pos <= w1 ? "" : "hidden"}></div></div>
-      <div class="hours">${labels.join("")}</div>
+      <div class="track" title="Нажмите — смотреть с этого места; колесо или два пальца — масштаб; перетаскивание — прокрутка">${inner}</div>
+      <div class="hours">${labels}</div>
       <div class="legend sub">
         ${Object.entries(SEG).map(([k, l]) => `<span><i class="seg ${k}"></i>${l}</span>`).join("")}
         <span><i class="evtick"></i>событие журнала</span>
         <span class="grow"></span>
         ${d.segments.length ? `записано за день ${Math.round(rec / 3600 * 10) / 10} ч` : '<b class="warn">за этот день записей нет</b>'}
       </div>
+      <div class="sub tlhint">Колесо мыши или два пальца — приблизить/отдалить, перетащить шкалу — раньше/позже, нажать — смотреть.</div>
       ${a.err ? `<div class="warnbar">${esc(a.err)}</div>` : ""}`;
     this._bindTimeline();
+  }
+
+  // Mouse: wheel zooms around the cursor (shift/trackpad sideways scrolls),
+  // drag scrolls. Touch: one finger scrolls, two fingers pinch. A tap plays.
+  _bindGestures(track) {
+    const ptrs = new Map();
+    let g = null;
+    const frac = (x) => { const r = track.getBoundingClientRect(); return Math.max(0, Math.min(1, (x - r.left) / r.width)); };
+    const at = (f) => { const [w0, w1] = this._archWindow(); return w0 + f * (w1 - w0); };
+    track.addEventListener("pointerdown", (ev) => {
+      if (!this._arch || !this._arch.data) return;
+      ev.stopPropagation();
+      try { track.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic pointer */ }
+      ptrs.set(ev.pointerId, ev.clientX);
+      const [w0, w1] = this._archWindow();
+      if (ptrs.size === 1) g = { x: ev.clientX, center: (w0 + w1) / 2, span: w1 - w0, moved: false };
+      else if (ptrs.size === 2) {
+        const [x1, x2] = [...ptrs.values()];
+        const f = frac((x1 + x2) / 2);
+        g = { pinch: Math.max(10, Math.abs(x1 - x2)), span: w1 - w0, anchor: at(f), moved: true };
+      }
+    });
+    track.addEventListener("pointermove", (ev) => {
+      if (!ptrs.has(ev.pointerId) || !g) return;
+      ptrs.set(ev.pointerId, ev.clientX);
+      const a = this._arch;
+      if (g.pinch && ptrs.size >= 2) {
+        const [x1, x2] = [...ptrs.values()];
+        this._zoomTo(g.span * g.pinch / Math.max(10, Math.abs(x1 - x2)), g.anchor, frac((x1 + x2) / 2));
+        return;
+      }
+      if (g.pinch) return;
+      const dx = ev.clientX - g.x;
+      if (Math.abs(dx) > 5) g.moved = true;
+      if (!g.moved) return;
+      a.center = g.center - (dx / track.getBoundingClientRect().width) * g.span;
+      a.userAt = Date.now();
+      this._paintTrack();
+    });
+    const up = (ev) => {
+      if (!ptrs.has(ev.pointerId)) return;
+      ptrs.delete(ev.pointerId);
+      if (ev.type === "pointerup" && g && !g.moved && !g.pinch && ptrs.size === 0) this._archPlay(at(frac(ev.clientX)));
+      if (ptrs.size === 0) g = null;
+      else if (g && g.pinch) { const [x] = [...ptrs.values()]; const [w0, w1] = this._archWindow(); g = { x, center: (w0 + w1) / 2, span: w1 - w0, moved: true }; }
+    };
+    track.addEventListener("pointerup", up);
+    track.addEventListener("pointercancel", up);
+    track.addEventListener("click", (ev) => ev.stopPropagation());
+    track.addEventListener("wheel", (ev) => {
+      const a = this._arch;
+      if (!a || !a.data) return;
+      ev.preventDefault(); ev.stopPropagation();
+      const [w0, w1] = this._archWindow();
+      const sideways = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) || ev.shiftKey;
+      if (sideways) {
+        const delta = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+        a.center = (w0 + w1) / 2 + (delta / track.getBoundingClientRect().width) * (w1 - w0);
+        a.userAt = Date.now();
+        this._paintTrack();
+        return;
+      }
+      const f = frac(ev.clientX);
+      this._zoomTo((w1 - w0) * Math.exp(ev.deltaY * 0.0025), at(f), f);
+    }, { passive: false });
   }
 
   _bindTimeline() {
     const a = this._arch, tl = this.shadowRoot.getElementById("tl");
     if (!a || !tl) return;
     const track = tl.querySelector(".track");
-    if (track) track.onclick = (ev) => {
-      ev.stopPropagation();
-      const r = track.getBoundingClientRect();
-      const [w0, w1] = this._archWindow();
-      this._archPlay(w0 + ((ev.clientX - r.left) / r.width) * (w1 - w0));
-    };
+    if (track) this._bindGestures(track);
     const date = tl.querySelector(".tldate");
     if (date) date.onchange = (ev) => {
       ev.stopPropagation();
@@ -706,7 +792,8 @@ class RaySharpNvrPanel extends HTMLElement {
       ev.stopPropagation();
       a.span = Number(b.dataset.span);
       if (a.pos) a.center = a.pos;
-      this._renderTimeline();
+      a.userAt = Date.now();
+      this._paintTrack();
     }; });
     tl.querySelectorAll("[data-arch]").forEach((b) => { b.onclick = (ev) => {
       ev.stopPropagation();
@@ -721,7 +808,8 @@ class RaySharpNvrPanel extends HTMLElement {
       if (k === "pan-" || k === "pan+") {
         const [w0, w1] = this._archWindow();
         a.center = (w0 + w1) / 2 + (k === "pan-" ? -1 : 1) * (w1 - w0) / 2;
-        this._renderTimeline();
+        a.userAt = Date.now();
+        this._paintTrack();
         return;
       }
       const marks = this._archMarks();
@@ -982,7 +1070,11 @@ const STYLE = `
   .tlbar .sep { width: 6px; }
   .tldate { padding: 4px 8px; border-radius: 8px; border: 1px solid var(--divider-color);
     background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 13px; color-scheme: light dark; }
-  .track { position: relative; height: 34px; border-radius: 6px; background: var(--secondary-background-color); cursor: pointer; overflow: hidden; }
+  .track { position: relative; height: 40px; border-radius: 6px; background: var(--secondary-background-color); cursor: grab;
+    overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .track:active { cursor: grabbing; }
+  .track .seg, .track .evtick, .track .cur { pointer-events: none; }
+  .tlhint { margin-top: 4px; }
   .seg { position: absolute; top: 0; bottom: 0; background: #607d8b; }
   .seg.motion { background: #ff9800; top: 6px; bottom: 6px; }
   .seg.smart { background: #e53935; top: 4px; bottom: 4px; }
