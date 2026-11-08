@@ -565,6 +565,8 @@ class RaySharpNvrPanel extends HTMLElement {
       ${!ch.online || ch.videoloss ? `<div class="warnbar">⚠ Камера ${ch.videoloss ? "потеряла видеосигнал" : "не в сети"} — потока нет, запись с неё сейчас не идёт.</div>` : ""}
       <div id="live" class="live"></div>
       ${mode === "archive" ? '<div id="tl" class="tl"></div>' : ""}
+      ${this._admin && ch.ptz ? `<div class="ptz" id="ptz">${PTZ.map(([l, c]) => c
+        ? `<button class="act" data-ptz="${c}" aria-label="${c.replace("Ptz_Cmd_", "")}">${l}</button>` : "<span></span>").join("")}</div>` : ""}
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
@@ -1061,15 +1063,12 @@ class RaySharpNvrPanel extends HTMLElement {
 
   _modalInfo(n, ch, act, evs) {
     evs.filter((e) => e.picture).forEach((e) => this._picture(e.id));
-    const ptz = this._admin && ch.ptz ? `<div class="ptz">${PTZ.map(([l, c]) => c
-      ? `<button class="act" data-ptz="${c}">${l}</button>` : "<span></span>").join("")}</div>` : "";
     return `<div class="hrow wrap">
         ${act.length ? act.map((t) => `<span class="chip on">${esc(TYPE[t] || t)}</span>`).join("") : '<span class="sub">сейчас спокойно</span>'}
         ${ch.recording === true ? '<span class="chip">● запись</span>' : ch.recording === false ? '<span class="chip">запись не идёт</span>' : ""}
         <span class="grow"></span>
         ${this._admin ? `<button class="act" data-do="snap">📷 Снимок</button>` : ""}
       </div>
-      ${ptz}
       <h3>События этой камеры — нажмите, чтобы посмотреть запись</h3>
       <div class="evrow">${evs.map((e) => {
         const pic = this._pics.get(e.id);
@@ -1109,11 +1108,36 @@ class RaySharpNvrPanel extends HTMLElement {
       this._renderModal();
       host.querySelector(".sheet")?.scrollIntoView({ block: "start" });
     }; });
+    // PTZ: hold to move, release to stop. A quick tap on a phone still moves a
+    // step: Stop waits for Start to reach the NVR and for at least 400 ms
+    // (otherwise Stop could even arrive first and the camera never stops).
     host.querySelectorAll("[data-ptz]").forEach((b) => {
+      if (b.dataset.bound) return;
+      b.dataset.bound = "1";
       const send = (state) => this._hass.callWS({ type: "raysharp_nvr/action", entry_id: n.entry_id,
         action: "ptz", channel: ch.num, command: b.dataset.ptz, state }).catch(() => {});
-      b.onpointerdown = () => send("Start");
-      b.onpointerup = b.onpointerleave = () => send("Stop");
+      let run = null;
+      const down = (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        if (run) return;
+        try { b.setPointerCapture(ev.pointerId); } catch (e) { /* old browsers */ }
+        b.classList.add("on");
+        run = { t0: Date.now(), started: send("Start") };
+      };
+      const up = async (ev) => {
+        if (ev) ev.stopPropagation();
+        const r = run; run = null;
+        b.classList.remove("on");
+        if (!r) return;
+        await r.started;
+        setTimeout(() => send("Stop"), Math.max(0, 400 - (Date.now() - r.t0)));
+      };
+      b.addEventListener("pointerdown", down);
+      b.addEventListener("pointerup", up);
+      b.addEventListener("pointercancel", up);
+      b.addEventListener("lostpointercapture", up);
+      b.addEventListener("contextmenu", (ev) => ev.preventDefault());
+      b.onclick = (ev) => ev.stopPropagation();
     });
   }
 }
@@ -1238,7 +1262,10 @@ const STYLE = `
   .live { background: #000; border-radius: 8px; overflow: hidden; min-height: 200px; }
   .live img, .live ha-camera-stream { width: 100%; display:block; }
   .ptz { display:grid; grid-template-columns: repeat(3, 44px); gap: 4px; margin-top: 10px; }
-  .ptz .act { padding: 6px 0; font-size: 16px; }
+  .ptz { grid-template-columns: repeat(3, 56px) !important; gap: 6px !important; }
+  .ptz .act { padding: 12px 0; font-size: 20px; touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  .ptz .act.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }
   /* Big screens: use the whole width and scale up, so a 4K monitor is not a
