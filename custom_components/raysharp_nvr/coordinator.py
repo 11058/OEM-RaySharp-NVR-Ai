@@ -271,6 +271,7 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # PTZ presets per channel: [{"no": 1, "name": "На ворота", "set": True}, ...]
         self.ptz_presets: dict[int, list[dict[str, Any]]] = {}
         self.preset_listeners: list = []
+        self._ptz_home: dict[int, dict[str, Any]] = {}  # what we set, when PTZ/Get does not say
         self._ec_errors = 0
         self._ec_dispatches = 0
         self._ec_last_error: str | None = None
@@ -711,8 +712,9 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "commands": sorted(k for k, v in self.PTZ_EXTRA.items() if v in cmds),
             "watch_modes": (rng.get("watch_mode_mode") or {}).get("items") or [],
             "watch_time_min": wm.get("min", 15), "watch_time_max": wm.get("max", 240),
-            "watch_mode": cur.get("watch_mode_mode"), "watch_num": cur.get("watch_mode_num"),
-            "watch_time": cur.get("watch_mode_time"),
+            "watch_mode": cur.get("watch_mode_mode") or ("Mode_Watch_Point" if (self._ptz_home.get(channel) or {}).get("no") else None),
+            "watch_num": cur.get("watch_mode_num") or (self._ptz_home.get(channel) or {}).get("no"),
+            "watch_time": cur.get("watch_mode_time") or (self._ptz_home.get(channel) or {}).get("seconds"),
             "cruise_mode": cur.get("current_cruise_mode"),
             "speed_max": (rng.get("speed") or {}).get("max", 10),
         }
@@ -729,15 +731,21 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_ptz_home(self, channel: int, no: int | None, seconds: int) -> None:
         """Idle return: after `seconds` without commands the camera goes to preset
-        `no` by itself (the camera's watch mode). no=None switches it off."""
-        from .const import API_PTZ_SET  # noqa: PLC0415
+        `no` by itself (the camera's watch mode, saved like its web UI does:
+        PTZ/Control Ptz_WatchMode_Save). no=None switches it off."""
+        from .const import API_PTZ_CONTROL  # noqa: PLC0415
 
+        base = {"channel": f"CH{channel}", "speed": 5}
         if no:
-            data = {"channel": f"CH{channel}", "watch_mode_mode": "Mode_Watch_Point",
-                    "watch_mode_num": int(no), "watch_mode_time": int(seconds)}
+            await self.client.async_api_call(API_PTZ_CONTROL, {
+                **base, "cmd": "Ptz_WatchMode_Save", "watch_mode_mode": "Mode_Watch_Point",
+                "watch_mode_num": int(no), "watch_mode_time": int(seconds)})
+            await self.client.async_api_call(API_PTZ_CONTROL, {**base, "cmd": "Ptz_QuickUse_WatchModeStart", "state": "Start"})
         else:
-            data = {"channel": f"CH{channel}", "watch_mode_mode": "Mode_Default_Cruise"}
-        await self.client.async_api_call(API_PTZ_SET, data)
+            await self.client.async_api_call(API_PTZ_CONTROL, {**base, "cmd": "Ptz_QuickUse_WatchModeStop", "state": "Start"})
+            await self.client.async_api_call(API_PTZ_CONTROL, {
+                **base, "cmd": "Ptz_WatchMode_Save", "watch_mode_mode": "Mode_Default_Cruise"})
+        self._ptz_home[channel] = {"no": no, "seconds": seconds}
 
     async def _async_clock_loop(self) -> None:
         """The NVR's time zone every 5 minutes: someone may change it."""
