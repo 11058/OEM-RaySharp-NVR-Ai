@@ -647,6 +647,7 @@ async def ws_stream(hass: HomeAssistant, connection, msg: dict) -> None:
 _RAW_ALLOWED = (
     "/API/Playback/", "/API/AI/", "/API/Event/", "/API/Log/",
     "/API/AlarmConfig/", "/API/SystemConfig/", "/API/SystemInfo/", "/API/ChannelConfig/",
+    "/API/PreviewChannel/",
 )
 
 
