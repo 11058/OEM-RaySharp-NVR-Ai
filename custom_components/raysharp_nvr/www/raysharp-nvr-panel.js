@@ -567,6 +567,7 @@ class RaySharpNvrPanel extends HTMLElement {
       ${mode === "archive" ? '<div id="tl" class="tl"></div>' : ""}
       ${this._admin && ch.ptz ? `<div class="ptz" id="ptz">${PTZ.map(([l, c]) => c
         ? `<button class="act" data-ptz="${c}" aria-label="${c.replace("Ptz_Cmd_", "")}">${l}</button>` : "<span></span>").join("")}</div>` : ""}
+      ${ch.ptz ? '<div id="presets" class="presets"><span class="sub">Точки камеры…</span></div>' : ""}
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
@@ -655,6 +656,57 @@ class RaySharpNvrPanel extends HTMLElement {
       live.innerHTML = '<div class="noimg">нет видео</div>';
     }
     this._bindModal(host, n, ch);
+    if (ch.ptz && ch.camera) this._loadPresets(ch);
+  }
+
+  // --- PTZ presets: saved in the camera (pan, tilt, zoom) with a name -------------
+  async _loadPresets(ch, list) {
+    const box = this.shadowRoot.getElementById("presets");
+    if (!box) return;
+    if (!list) {
+      try { list = (await this._hass.callWS({ type: "raysharp_nvr/ptz_presets", camera: ch.camera })).presets; }
+      catch (e) { box.innerHTML = `<div class="warnbar">⚠ Точки камеры не прочитаны: ${esc(e.message || e)}</div>`; return; }
+    }
+    this._presets = { cam: ch.camera, list, edit: this._presets && this._presets.cam === ch.camera ? this._presets.edit : false };
+    this._renderPresets(ch);
+  }
+
+  _renderPresets(ch) {
+    const box = this.shadowRoot.getElementById("presets");
+    const P = this._presets;
+    if (!box || !P) return;
+    const set = P.list.filter((p) => p.set);
+    const free = P.list.find((p) => !p.set);
+    const chips = set.map((p) => P.edit
+      ? `<span class="pchip edit"><input data-pname="${p.no}" value="${esc(p.name)}" maxlength="32" placeholder="Точка ${p.no}">
+           <button class="act" data-pop="rename" data-no="${p.no}" title="Сохранить имя">✓</button>
+           <button class="act" data-pop="save" data-no="${p.no}" title="Записать сюда текущее положение">⟳</button>
+           <button class="act danger" data-pop="clear" data-no="${p.no}" title="Удалить точку">✕</button></span>`
+      : `<button class="act pchip" data-pop="call" data-no="${p.no}">🎯 ${esc(p.name || `Точка ${p.no}`)}</button>`).join("");
+    const admin = this._admin ? (P.edit
+      ? `${free ? `<span class="pchip edit new"><input data-pname="new" maxlength="32" placeholder="Новая точка, напр. «На ворота»">
+           <button class="act primary" data-pop="save" data-no="${free.no}">＋ Запомнить текущее положение (№${free.no})</button></span>` : ""}
+         <button class="act" data-pop="done">Готово</button>`
+      : `<button class="act" data-pop="edit">✎ Точки…</button>`) : "";
+    box.innerHTML = `<div class="hrow wrap">${chips || (P.edit ? "" : '<span class="sub">Точек ещё нет — поверните камеру и нажмите «✎ Точки…»</span>')}${admin}</div>
+      <div class="sub pnote"></div>`;
+    const note = box.querySelector(".pnote");
+    box.querySelectorAll("[data-pop]").forEach((b) => { b.onclick = async (ev) => {
+      ev.stopPropagation();
+      const op = b.dataset.pop, no = Number(b.dataset.no);
+      if (op === "edit" || op === "done") { P.edit = op === "edit"; this._renderPresets(ch); return; }
+      if (op === "clear" && b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Удалить?"; return; }
+      const inp = box.querySelector(`[data-pname="${op === "save" && !P.list.find((p) => p.no === no && p.set) ? "new" : no}"]`);
+      const name = inp ? inp.value.trim() : "";
+      b.disabled = true;
+      note.textContent = op === "call" ? "Поворачиваю…" : "Сохраняю в камере…";
+      try {
+        const r = await this._hass.callWS({ type: "raysharp_nvr/ptz_preset", camera: ch.camera, no, op, name });
+        if (op !== "call") { P.list = r.presets; this._renderPresets(ch); return; }
+        note.textContent = "";
+      } catch (e) { note.textContent = `⚠ ${e.message || e}`; }
+      b.disabled = false;
+    }; });
   }
 
   // --- archive ----------------------------------------------------------------
@@ -1272,6 +1324,13 @@ const STYLE = `
   .ptz .act { padding: 12px 0; font-size: 20px; touch-action: none; user-select: none; -webkit-user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
   .ptz .act.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+  .presets { margin-top: 10px; }
+  .presets .hrow { gap: 6px; }
+  .pchip.edit { display:inline-flex; gap: 4px; align-items:center; padding: 2px; border: 1px solid var(--divider-color); border-radius: 8px; }
+  .pchip.edit input { width: 150px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--divider-color);
+    background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 13px; }
+  .pchip.new input { width: 230px; }
+  .act.danger { border-color: var(--error-color, #c62828); color: var(--error-color, #c62828); }
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }
   /* Big screens: use the whole width and scale up, so a 4K monitor is not a

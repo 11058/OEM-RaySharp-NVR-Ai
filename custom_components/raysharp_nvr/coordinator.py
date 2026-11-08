@@ -268,6 +268,9 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._clock_task = None
         self.snapshot_errors: dict[int, str] = {}
         self.channel_abilities: dict[int, list[str]] = {}
+        # PTZ presets per channel: [{"no": 1, "name": "На ворота", "set": True}, ...]
+        self.ptz_presets: dict[int, list[dict[str, Any]]] = {}
+        self.preset_listeners: list = []
         self._ec_errors = 0
         self._ec_dispatches = 0
         self._ec_last_error: str | None = None
@@ -653,10 +656,48 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("Archive bounds failed: %s", err)
             await asyncio.sleep(3600)
 
+    def ptz_channels(self) -> list[int]:
+        return sorted(n for n, ab in self.channel_abilities.items() if any("ptz" in a.lower() for a in ab))
+
+    async def async_refresh_presets(self, channel: int) -> list[dict[str, Any]]:
+        """The camera's PTZ presets as the NVR keeps them (PTZ/Get)."""
+        from .const import API_PTZ_GET  # noqa: PLC0415
+
+        resp = await self.client.async_api_call(API_PTZ_GET, {"channel": f"CH{channel}"})
+        data = self._extract_data(resp) or {}
+        out = []
+        for i, p in enumerate(data.get("preset_point_obj") or []):
+            if not isinstance(p, dict):
+                continue
+            out.append({"no": i + 1, "name": str(p.get("name") or "").strip(), "set": bool(p.get("add"))})
+        self.ptz_presets[channel] = out
+        for cb in list(self.preset_listeners):
+            cb(channel)
+        return out
+
+    async def async_preset(self, channel: int, op: str, no: int, name: str = "") -> None:
+        """call / save / rename / clear one preset of a PTZ camera."""
+        from .const import API_PTZ_CONTROL  # noqa: PLC0415
+
+        cmd = {"call": "Ptz_Cmd_CallPreset", "save": "Ptz_Cmd_AddPreset",
+               "rename": "Ptz_PresetPoint_ChangeName", "clear": "Ptz_Cmd_ClearPreset"}[op]
+        payload: dict[str, Any] = {"channel": f"CH{channel}", "cmd": cmd, "speed": 50,
+                                   "preset_point_no": int(no)}
+        if op in ("save", "rename"):
+            payload["preset_point_name"] = name or f"Точка {no}"
+        await self.client.async_api_call(API_PTZ_CONTROL, payload)
+        if op != "call":
+            await self.async_refresh_presets(channel)
+
     async def _async_clock_loop(self) -> None:
         """The NVR's time zone every 5 minutes: someone may change it."""
         while True:
             await asyncio.sleep(300)
+            for ch in self.ptz_channels():
+                try:
+                    await self.async_refresh_presets(ch)
+                except Exception as err:  # noqa: BLE001 - no PTZ right, camera away
+                    _LOGGER.debug("PTZ presets CH%s: %s", ch, err)
             try:
                 await self._async_learn_clock()
             except asyncio.CancelledError:

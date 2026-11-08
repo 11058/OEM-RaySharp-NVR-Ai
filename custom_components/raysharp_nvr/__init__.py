@@ -776,7 +776,7 @@ async def _async_handle_ptz_control(hass: HomeAssistant, call: ServiceCall) -> N
         "speed": speed,
     }
     if preset_num is not None:
-        payload["preset_num"] = preset_num
+        payload["preset_point_no"] = preset_num  # the NVR's own field name
 
     try:
         await coordinator.client.async_api_call(API_PTZ_CONTROL, payload)

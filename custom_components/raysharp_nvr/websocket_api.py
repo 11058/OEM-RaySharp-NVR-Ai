@@ -1014,6 +1014,57 @@ def ws_journal_clear(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], {"removed": removed, "left": len(log.events)})
 
 
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/ptz_presets", vol.Required("camera"): str}
+)
+@websocket_api.async_response
+async def ws_ptz_presets(hass: HomeAssistant, connection, msg: dict) -> None:
+    """The camera's PTZ presets (fresh from the NVR)."""
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    try:
+        presets = await cam.coordinator.async_refresh_presets(cam._channel_num)  # noqa: SLF001
+    except Exception as err:  # noqa: BLE001
+        text = str(err)
+        if "no_permission" in text:
+            text = "Регистратор не разрешает этой учётке PTZ: включите право «PTZ» в пользователях регистратора"
+        connection.send_error(msg["id"], "failed", text)
+        return
+    connection.send_result(msg["id"], {"presets": presets})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/ptz_preset",
+        vol.Required("camera"): str,
+        vol.Required("no"): vol.All(int, vol.Range(min=1, max=255)),
+        vol.Required("op"): vol.In(["call", "save", "rename", "clear"]),
+        vol.Optional("name", default=""): vol.All(str, vol.Length(max=32)),
+    }
+)
+@websocket_api.async_response
+async def ws_ptz_preset(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Go to a preset (anyone who sees the camera); save / rename / delete (admin)."""
+    if msg["op"] != "call" and not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Сохранять и менять точки может администратор")
+        return
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    try:
+        await cam.coordinator.async_preset(cam._channel_num, msg["op"], msg["no"], msg["name"].strip())  # noqa: SLF001
+    except Exception as err:  # noqa: BLE001
+        text = str(err)
+        if "no_permission" in text:
+            text = "Регистратор не разрешает этой учётке PTZ: включите право «PTZ» в пользователях регистратора"
+        connection.send_error(msg["id"], "failed", text)
+        return
+    connection.send_result(msg["id"], {"presets": cam.coordinator.ptz_presets.get(cam._channel_num, [])})  # noqa: SLF001
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
@@ -1021,7 +1072,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
                     ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe,
                     ws_intercom_subscribe, ws_intercom_state, ws_intercom_answer, ws_intercom_hangup,
-                    ws_intercom_test_ring, ws_journal_clear):  # fmt: skip
+                    ws_intercom_test_ring, ws_journal_clear, ws_ptz_presets, ws_ptz_preset):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))

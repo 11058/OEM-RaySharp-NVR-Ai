@@ -57,8 +57,74 @@ async def async_setup_entry(
 
     # NVR reboot button
     entities.append(RaySharpRebootButton(coordinator))
-
     async_add_entities(entities)
+
+    # One button per saved PTZ preset: "CAM01 На ворота". Names come from the
+    # camera (set them where the preset is saved); new presets appear on the fly.
+    mac = (coordinator.data.get(DATA_DEVICE_INFO, {}) or {}).get("mac_addr", "unknown")
+    known: set[tuple[int, int]] = set()
+
+    def _add(channel: int) -> None:
+        new = []
+        for p in coordinator.ptz_presets.get(channel, []):
+            key = (channel, p["no"])
+            if p["set"] and key not in known:
+                known.add(key)
+                new.append(RaySharpPresetButton(coordinator, mac, channel, p["no"]))
+        if new:
+            async_add_entities(new)
+
+    coordinator.preset_listeners.append(_add)
+    for ch in coordinator.ptz_channels():
+        try:
+            await coordinator.async_refresh_presets(ch)
+        except Exception as err:  # noqa: BLE001 - e.g. no PTZ right for this account yet
+            _LOGGER.debug("PTZ presets CH%s not read: %s", ch, err)
+
+
+class RaySharpPresetButton(ButtonEntity):
+    """Turn a PTZ camera to one of its saved presets (pan, tilt and zoom)."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:crosshairs-gps"
+    _attr_should_poll = False
+
+    def __init__(self, coordinator: RaySharpNVRCoordinator, mac: str, channel: int, no: int) -> None:
+        self.coordinator = coordinator
+        self._ch = channel
+        self._no = no
+        self._attr_unique_id = f"{mac}_ch{channel}_preset{no}"
+        from homeassistant.helpers.device_registry import DeviceInfo  # noqa: PLC0415
+
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, f"{mac}_ch{channel}")})
+
+    def _preset(self) -> dict[str, Any] | None:
+        return next((p for p in self.coordinator.ptz_presets.get(self._ch, []) if p["no"] == self._no), None)
+
+    @property
+    def name(self) -> str:
+        p = self._preset()
+        return (p or {}).get("name") or f"Точка {self._no}"
+
+    @property
+    def available(self) -> bool:
+        p = self._preset()
+        return bool(p and p["set"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"preset": self._no, "channel": self._ch}
+
+    async def async_added_to_hass(self) -> None:
+        def _changed(channel: int) -> None:
+            if channel == self._ch and self.hass:
+                self.async_write_ha_state()
+
+        self.coordinator.preset_listeners.append(_changed)
+        self.async_on_remove(lambda: self.coordinator.preset_listeners.remove(_changed))
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_preset(self._ch, "call", self._no)
 
 
 class RaySharpRebootButton(RaySharpEntity, ButtonEntity):
