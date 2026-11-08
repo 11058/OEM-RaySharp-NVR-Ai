@@ -568,7 +568,8 @@ class RaySharpNvrPanel extends HTMLElement {
       ${ch.ptz ? `<div class="ptzrow">
         ${this._admin ? `<div class="ptz" id="ptz">${PTZ.map(([l, c]) => c
           ? `<button class="act" data-ptz="${c}" aria-label="${c.replace("Ptz_Cmd_", "")}">${l}</button>` : "<span></span>").join("")}</div>` : ""}
-        <div id="presets" class="presets"><span class="sub">Точки камеры…</span></div></div>` : ""}
+        <div id="presets" class="presets"><span class="sub">Точки камеры…</span></div></div>
+        <div id="ptzrules" class="ptzrules"></div>` : ""}
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
@@ -677,6 +678,106 @@ class RaySharpNvrPanel extends HTMLElement {
     }
   }
 
+  // --- PTZ scenarios: «when X happens → camera to preset Y (and follow the person)» ---
+  async _loadRules(ch, data) {
+    if (!data) {
+      try { data = await this._hass.callWS({ type: "raysharp_nvr/ptz_rules", camera: ch.camera }); }
+      catch (e) { return; }
+    }
+    this._rules = { cam: ch.camera, ...data, form: this._rules && this._rules.cam === ch.camera ? this._rules.form : null };
+    this._renderRules(ch);
+  }
+
+  _renderRules(ch) {
+    const box = this.shadowRoot.getElementById("ptzrules");
+    const R = this._rules, P = this._presets;
+    if (!box || !R || !P) return;
+    const st = this._hass.states;
+    const set = P.list.filter((p) => p.set);
+    const pname = (no) => { const p = P.list.find((x) => x.no === no); return p ? (p.name || `Точка ${no}`) : `Точка ${no}`; };
+    const fname = (id) => (st[id] && st[id].attributes.friendly_name) || id;
+    const TO = {
+      binary_sensor: [["on", "сработал"], ["off", "отпустил"]],
+      switch: [["on", "включился"], ["off", "выключился"]], input_boolean: [["on", "включился"], ["off", "выключился"]],
+      light: [["on", "включился"], ["off", "выключился"]],
+      cover: [["opening", "открывается"], ["open", "открыт"], ["closing", "закрывается"], ["closed", "закрыт"]],
+      lock: [["unlocked", "отперт"], ["open", "открыт"], ["locked", "заперт"]],
+    };
+    const PRESS = ["button", "input_button", "event"];
+    const toLabel = (id, to) => {
+      const d = id.split(".")[0];
+      if (!to) return PRESS.includes(d) ? "нажата" : "изменилась";
+      const o = (TO[d] || []).find((x) => x[0] === to);
+      return o ? o[1] : `→ ${to}`;
+    };
+    const list = R.rules.map((r) => {
+      const last = (R.log || []).find((e) => e.rule === r.id);
+      return `<div class="rrow ${r.enabled === false ? "off" : ""}">
+        <div class="rtext">⚡ <b>${esc(fname(r.trigger))}</b> ${esc(toLabel(r.trigger, r.to))} → камера на <b>«${esc(pname(r.preset))}»</b>${r.track ? ", ведёт человека" : ""}
+          ${last ? `<div class="sub">${last.ok ? "✓" : "⚠"} ${new Date(last.ts * 1000).toLocaleString()} — ${esc(last.text)}</div>` : ""}</div>
+        ${this._admin ? `<div class="rbtn"><button class="act" data-rop="test" data-id="${r.id}" title="Выполнить сейчас">▶</button>
+          <button class="act" data-rop="toggle" data-id="${r.id}" title="${r.enabled === false ? "Включить" : "Выключить"}">${r.enabled === false ? "⏵ Вкл" : "⏸"}</button>
+          <button class="act" data-rop="edit" data-id="${r.id}" title="Изменить">✎</button>
+          <button class="act danger" data-rop="del" data-id="${r.id}" title="Удалить">✕</button></div>` : ""}
+      </div>`;
+    }).join("");
+    let form = "";
+    const F = R.form;
+    if (F && this._admin) {
+      const doms = ["button", "input_button", "binary_sensor", "switch", "input_boolean", "cover", "lock", "light", "event"];
+      const ents = Object.keys(st).filter((id) => doms.includes(id.split(".")[0]))
+        .sort((a, b) => fname(a).localeCompare(fname(b), "ru"));
+      const d = (F.trigger || "").split(".")[0];
+      const tos = PRESS.includes(d) ? [["", "нажата"]] : [["", "любое изменение"], ...(TO[d] || [])];
+      form = `<div class="rform">
+        <label>Когда <select data-f="trigger"><option value="">— выберите кнопку или датчик —</option>${ents.map((id) =>
+          `<option value="${id}" ${id === F.trigger ? "selected" : ""}>${esc(fname(id))}</option>`).join("")}</select></label>
+        ${F.trigger ? `<label>состояние <select data-f="to">${tos.map(([v, l]) => `<option value="${v}" ${v === (F.to || "") ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
+        <label>камера на <select data-f="preset">${set.map((p) => `<option value="${p.no}" ${p.no === F.preset ? "selected" : ""}>${esc(p.name || `Точка ${p.no}`)}</option>`).join("")}</select></label>
+        ${(P.set && (P.set.commands || []).includes("track_human")) ? `<label class="chk"><input type="checkbox" data-f="track" ${F.track ? "checked" : ""}> и вести человека в кадре</label>` : ""}
+        <div class="hrow"><button class="act primary" data-rop="save" ${F.trigger && set.length ? "" : "disabled"}>Сохранить</button>
+          <button class="act" data-rop="cancel">Отмена</button></div></div>`;
+    }
+    const homeP = P.set && P.set.watch_mode === "Mode_Watch_Point" ? pname(P.set.watch_num) : null;
+    box.innerHTML = (R.rules.length || this._admin) ? `<div class="rhead">Сценарии</div>
+      ${list || '<div class="sub">Сценариев нет. Например: нажали «Шлагбаум» → камера на «Шлагбаум» и ведёт человека.</div>'}
+      ${form}
+      ${this._admin && !F ? `<button class="act" data-rop="new" ${set.length ? "" : "disabled title=\"Сначала сохраните точки\""}>＋ Сценарий</button>` : ""}
+      ${R.rules.length && homeP ? `<div class="sub">После сценария камера сама вернётся на «${esc(homeP)}» через ${P.set.watch_time || 60} с без действий.</div>` : ""}
+      <div class="sub rnote"></div>` : "";
+    const note = box.querySelector(".rnote");
+    box.querySelectorAll("[data-f]").forEach((el) => { el.onchange = () => {
+      const k = el.dataset.f;
+      F[k] = k === "track" ? el.checked : k === "preset" ? Number(el.value) : el.value;
+      if (k === "trigger") { F.to = ""; this._renderRules(ch); }
+    }; });
+    const call = async (type, extra) => {
+      try { await this._loadRules(ch, await this._hass.callWS({ type, camera: ch.camera, ...extra })); }
+      catch (e) { if (note) note.textContent = `⚠ ${e.message || e}`; }
+    };
+    box.querySelectorAll("[data-rop]").forEach((b) => { b.onclick = async (ev) => {
+      ev.stopPropagation();
+      const op = b.dataset.rop, r = R.rules.find((x) => x.id === b.dataset.id);
+      if (op === "new") { R.form = { trigger: "", to: "", preset: (set.find((p) => /шлаг/i.test(p.name)) || set[0] || {}).no, track: false }; this._renderRules(ch); return; }
+      if (op === "edit") { R.form = { ...r }; this._renderRules(ch); return; }
+      if (op === "cancel") { R.form = null; this._renderRules(ch); return; }
+      if (op === "del" && b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Удалить?"; return; }
+      b.disabled = true;
+      if (op === "save") {
+        const f = R.form; R.form = null;
+        await call("raysharp_nvr/ptz_rule_save", { trigger: f.trigger, to: f.to || "", preset: Number(f.preset), track: !!f.track,
+          enabled: f.enabled !== false, ...(f.id ? { rule_id: f.id } : {}) });
+      } else if (op === "toggle") {
+        await call("raysharp_nvr/ptz_rule_save", { rule_id: r.id, trigger: r.trigger, to: r.to || "", preset: r.preset, track: !!r.track, enabled: r.enabled === false });
+      } else if (op === "del") {
+        await call("raysharp_nvr/ptz_rule_delete", { rule_id: r.id });
+      } else if (op === "test") {
+        if (note) note.textContent = "Выполняю…";
+        await call("raysharp_nvr/ptz_rule_test", { rule_id: r.id });
+      }
+    }; });
+  }
+
   // Hold-to-act for zoom / focus, like the arrows: Stop after Start, >= 400 ms.
   _hold(b, start, stop) {
     let run = null;
@@ -710,7 +811,7 @@ class RaySharpNvrPanel extends HTMLElement {
       : `<button class="act pchip" data-pop="call" data-no="${p.no}">🎯 ${esc(p.name || `Точка ${p.no}`)}</button>`).join("");
     const admin = this._admin ? (P.edit
       ? `${free ? `<span class="pchip edit new"><input data-pname="new" maxlength="32" placeholder="Новая точка, напр. «На ворота»">
-           <button class="act primary" data-pop="save" data-no="${free.no}">＋ Запомнить текущее положение (№${free.no})</button></span>` : ""}
+           <button class="act primary" data-pop="save" data-no="${free.no}">＋ Запомнить текущее положение как №${free.no}</button></span>` : ""}
          <button class="act" data-pop="done">Готово</button>`
       : `<button class="act" data-pop="edit">✎ Точки…</button>`) : "";
     // The camera's own extras: zoom, human tracking, idle return to the home preset.
@@ -730,6 +831,8 @@ class RaySharpNvrPanel extends HTMLElement {
         `<option value="${p.no}" ${homeP && homeP.no === p.no ? "selected" : ""}>${esc(p.name || `Точка ${p.no}`)}</option>`)].join("")}</select>
       через <input data-homesec type="number" min="${S.watch_time_min || 15}" max="${S.watch_time_max || 240}" value="${S.watch_time || 60}"> с
       <button class="act primary" data-pop="home">Сохранить</button></div>` : ""}`;
+    if (!this._rules || this._rules.cam !== ch.camera) this._loadRules(ch); else setTimeout(() => this._renderRules(ch), 0);
+    box.classList.toggle("editing", !!P.edit);
     box.innerHTML = `<div class="plist">${chips || (P.edit ? "" : '<span class="sub">Точек ещё нет — поверните камеру и нажмите «✎ Точки…»</span>')}</div>
       <div class="pfoot">${admin}</div>${extras}
       <div class="sub pnote"></div>`;
@@ -1399,7 +1502,12 @@ const STYLE = `
   .pchip.edit input { flex: 1; min-width: 0; padding: 8px; border-radius: 6px; border: 1px solid var(--divider-color);
     background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 15px; }
   .pchip.edit .act { padding: 8px 10px; font-size: 15px; }
-  .pfoot .pchip.new { flex: 1 1 100%; }
+  .pfoot .pchip.new { flex: 1 1 100%; flex-direction: column; align-items: stretch; }
+  .pfoot .pchip.new input { width: auto; }
+  .pfoot .pchip.new .act { white-space: normal; }
+  /* editing needs the whole width: drop under the arrows */
+  .presets.editing { flex-basis: 100%; }
+  .pchip.edit .act { flex: none; }
   .pextra { display:flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
   .pextra .act { padding: 10px 12px; font-size: 15px; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   .pextra .act.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
@@ -1407,6 +1515,19 @@ const STYLE = `
   .phome select, .phome input { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--divider-color);
     background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 14px; }
   .phome input { width: 70px; }
+  .ptzrules { margin-top: 12px; }
+  .ptzrules .rhead { font-weight: 600; margin-bottom: 6px; }
+  .rrow { display:flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 8px;
+    border: 1px solid var(--divider-color); border-radius: 8px; margin-bottom: 6px; font-size: 14px; }
+  .rrow.off { opacity: .55; }
+  .rtext { flex: 1 1 220px; min-width: 0; }
+  .rbtn { display:flex; gap: 4px; }
+  .rbtn .act { padding: 8px 10px; }
+  .rform { display:flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--primary-color); border-radius: 8px; margin-bottom: 6px; font-size: 14px; }
+  .rform label { display:flex; gap: 8px; align-items:center; flex-wrap: wrap; }
+  .rform select { flex: 1 1 200px; min-width: 0; max-width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--divider-color);
+    background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 15px; }
+  .rform .chk input { width: 20px; height: 20px; }
   .act.danger { border-color: var(--error-color, #c62828); color: var(--error-color, #c62828); }
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }

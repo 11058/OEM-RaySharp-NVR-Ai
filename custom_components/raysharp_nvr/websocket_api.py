@@ -1138,6 +1138,79 @@ async def ws_ptz_home(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], res)
 
 
+def _rules(hass: HomeAssistant):
+    from .ptz_rules import KEY  # noqa: PLC0415
+
+    return hass.data.get(KEY)
+
+
+def _rules_for(hass: HomeAssistant, camera: str) -> dict:
+    r = _rules(hass)
+    if r is None:
+        return {"rules": [], "log": []}
+    mine = [x for x in r.rules if x.get("camera") == camera]
+    ids = {x["id"] for x in mine}
+    return {"rules": mine, "log": [e for e in r.log if e["rule"] in ids][:5]}
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/ptz_rules", vol.Required("camera"): str})
+@callback
+def ws_ptz_rules(hass: HomeAssistant, connection, msg: dict) -> None:
+    connection.send_result(msg["id"], _rules_for(hass, msg["camera"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/ptz_rule_save",
+        vol.Required("camera"): str,
+        vol.Optional("rule_id"): str,
+        vol.Required("trigger"): str,
+        vol.Optional("to", default=""): str,
+        vol.Required("preset"): vol.All(int, vol.Range(min=1, max=255)),
+        vol.Optional("track", default=False): bool,
+        vol.Optional("enabled", default=True): bool,
+    }
+)
+@callback
+def ws_ptz_rule_save(hass: HomeAssistant, connection, msg: dict) -> None:
+    if _raysharp_camera(hass, msg["camera"]) is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    if hass.states.get(msg["trigger"]) is None:
+        connection.send_error(msg["id"], "not_found", f"Нет сущности {msg['trigger']}")
+        return
+    rule = {k: msg[k] for k in ("camera", "trigger", "to", "preset", "track", "enabled")}
+    if msg.get("rule_id"):
+        rule["id"] = msg["rule_id"]
+    _rules(hass).save_rule(rule)
+    connection.send_result(msg["id"], _rules_for(hass, msg["camera"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/ptz_rule_delete", vol.Required("camera"): str, vol.Required("rule_id"): str}
+)
+@callback
+def ws_ptz_rule_delete(hass: HomeAssistant, connection, msg: dict) -> None:
+    _rules(hass).delete_rule(msg["rule_id"])
+    connection.send_result(msg["id"], _rules_for(hass, msg["camera"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/ptz_rule_test", vol.Required("camera"): str, vol.Required("rule_id"): str}
+)
+@websocket_api.async_response
+async def ws_ptz_rule_test(hass: HomeAssistant, connection, msg: dict) -> None:
+    try:
+        await _rules(hass).test(msg["rule_id"])
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "failed", _ptz_err(err))
+        return
+    connection.send_result(msg["id"], _rules_for(hass, msg["camera"]))
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
@@ -1146,7 +1219,8 @@ def async_register_websocket(hass: HomeAssistant) -> None:
                     ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe,
                     ws_intercom_subscribe, ws_intercom_state, ws_intercom_answer, ws_intercom_hangup,
                     ws_intercom_test_ring, ws_journal_clear, ws_ptz_presets, ws_ptz_preset,
-                    ws_ptz_settings, ws_ptz_extra, ws_ptz_home):  # fmt: skip
+                    ws_ptz_settings, ws_ptz_extra, ws_ptz_home,
+                    ws_ptz_rules, ws_ptz_rule_save, ws_ptz_rule_delete, ws_ptz_rule_test):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))

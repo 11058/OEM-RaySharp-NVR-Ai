@@ -29,6 +29,9 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
     from .websocket_api import async_register_websocket
 
     await async_setup_event_log(hass)
+    from .ptz_rules import async_setup_rules  # noqa: PLC0415
+
+    await async_setup_rules(hass)
     async_register_websocket(hass)
     if not (WWW / BUNDLE).is_file():
         _LOGGER.warning("Panel bundle missing, video panel not registered")
