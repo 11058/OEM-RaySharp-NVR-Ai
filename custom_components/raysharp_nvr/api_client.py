@@ -43,6 +43,19 @@ class RaySharpNVRApiError(RaySharpNVRConnectionError):
         super().__init__(f"API call to {path} refused: {reason} ({error_code})")
 
 
+async def _error_reason(resp) -> str:
+    """The NVR's own words for a refusal: {"error_code": "no_permission", ...}."""
+    try:
+        body = await resp.json(content_type=None)
+    except Exception:  # noqa: BLE001 - not JSON
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    code = body.get("error_code") or (body.get("data") or {}).get("error_code") if isinstance(body.get("data"), dict) or body.get("error_code") else ""
+    reason = body.get("reason") or ""
+    return f" ({code}{': ' + reason if reason else ''})" if code or reason else ""
+
+
 def _raise_for_api_error(path: str, payload: Any) -> None:
     """Raise when a 200 response carries a failure envelope.
 
@@ -373,6 +386,7 @@ class RaySharpNVRClient:
                 if resp.status != 200:
                     raise RaySharpNVRConnectionError(
                         f"API call to {path} failed with status {resp.status}"
+                        + await _error_reason(resp)
                     )
 
                 # Update CSRF token if provided
@@ -416,6 +430,7 @@ class RaySharpNVRClient:
                 if resp.status != 200:
                     raise RaySharpNVRConnectionError(
                         f"API call to {path} failed with status {resp.status}"
+                        + await _error_reason(resp)
                     )
 
                 csrf = (

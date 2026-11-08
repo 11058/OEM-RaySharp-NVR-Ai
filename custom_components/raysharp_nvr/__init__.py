@@ -789,6 +789,14 @@ async def _async_handle_ptz_control(hass: HomeAssistant, call: ServiceCall) -> N
         )
     except RaySharpNVRConnectionError as err:
         _LOGGER.error("PTZ control failed: %s", err)
+        from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
+
+        if "no_permission" in str(err):
+            raise HomeAssistantError(
+                "Регистратор не разрешает этой учётке управлять PTZ: включите ей право «PTZ» "
+                "(Управление поворотом) в настройках пользователей регистратора"
+            ) from err
+        raise HomeAssistantError(f"PTZ: {err}") from err
 
 
 async def _async_handle_get_snapshot(hass: HomeAssistant, call: ServiceCall) -> None:

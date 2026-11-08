@@ -23,9 +23,9 @@ const SUFFIX = {
 const PRIORITY = ["doorbell", "person", "vehicle", "intrusion", "line_crossing", "face", "plate",
   "region_entrance", "region_exiting", "crowd", "wander", "stationary_object", "occlusion", "io",
   "pir", "sound", "smart", "motion", "other"];
-const PTZ = [["↖", "Ptz_Cmd_LeftUp"], ["↑", "Ptz_Cmd_Up"], ["↗", "Ptz_Cmd_RightUp"],
+const PTZ = [["↖", "Ptz_Cmd_UpLeft"], ["↑", "Ptz_Cmd_Up"], ["↗", "Ptz_Cmd_UpRight"],
   ["←", "Ptz_Cmd_Left"], ["", ""], ["→", "Ptz_Cmd_Right"],
-  ["↙", "Ptz_Cmd_LeftDown"], ["↓", "Ptz_Cmd_Down"], ["↘", "Ptz_Cmd_RightDown"]];
+  ["↙", "Ptz_Cmd_DownLeft"], ["↓", "Ptz_Cmd_Down"], ["↘", "Ptz_Cmd_DownRight"]];
 
 const PERIODS = [[3600, "1 ч"], [6 * 3600, "6 ч"], [86400, "сутки"], [3 * 86400, "3 дня"], [7 * 86400, "неделя"]];
 function loadPeriod() {
@@ -1115,7 +1115,13 @@ class RaySharpNvrPanel extends HTMLElement {
       if (b.dataset.bound) return;
       b.dataset.bound = "1";
       const send = (state) => this._hass.callWS({ type: "raysharp_nvr/action", entry_id: n.entry_id,
-        action: "ptz", channel: ch.num, command: b.dataset.ptz, state }).catch(() => {});
+        action: "ptz", channel: ch.num, command: b.dataset.ptz, state }).catch((e) => {
+          const box = host.querySelector("#ptz");
+          if (!box) return;
+          let note = box.nextElementSibling && box.nextElementSibling.classList.contains("ptzerr") ? box.nextElementSibling : null;
+          if (!note) { note = document.createElement("div"); note.className = "warnbar ptzerr"; box.after(note); }
+          note.textContent = `⚠ Поворот не выполнен: ${e.message || e}`;
+        });
       let run = null;
       const down = (ev) => {
         ev.preventDefault(); ev.stopPropagation();
