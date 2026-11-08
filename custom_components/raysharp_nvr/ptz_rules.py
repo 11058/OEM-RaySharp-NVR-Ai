@@ -40,14 +40,17 @@ class PtzRules:
         self._unsub = None
         self._last: dict[str, float] = {}
         self.log: list[dict[str, Any]] = []  # last runs, for the panel
+        # camera -> {"no", "seconds"}: the idle-return preset we set (PTZ/Get does not report it)
+        self.home: dict[str, dict[str, Any]] = {}
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
         self.rules = [r for r in data.get("rules", []) if isinstance(r, dict) and r.get("id")]
+        self.home = data.get("home") or {}
         self._watch()
 
     def _save(self) -> None:
-        self._store.async_delay_save(lambda: {"rules": self.rules}, 2)
+        self._store.async_delay_save(lambda: {"rules": self.rules, "home": self.home}, 2)
 
     @callback
     def _watch(self) -> None:
@@ -101,6 +104,13 @@ class PtzRules:
                 entry["text"] = "нет права PTZ у учётки регистратора"
             _LOGGER.warning("PTZ scenario %s failed: %s", rule.get("id"), err)
         self.log = [entry, *self.log][:20]
+
+    def set_home(self, camera: str, no: int | None, seconds: int) -> None:
+        if no:
+            self.home[camera] = {"no": int(no), "seconds": int(seconds)}
+        else:
+            self.home.pop(camera, None)
+        self._save()
 
     # --- editing ----------------------------------------------------------------
     def save_rule(self, rule: dict[str, Any]) -> dict[str, Any]:

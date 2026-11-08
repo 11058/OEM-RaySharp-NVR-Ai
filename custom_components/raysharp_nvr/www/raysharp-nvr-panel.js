@@ -821,10 +821,13 @@ class RaySharpNvrPanel extends HTMLElement {
     const extras = `<div class="pextra">
       ${can("zoom_in") ? `<button class="act hold" data-hold="zoom_out" title="Отдалить">🔍−</button><button class="act hold" data-hold="zoom_in" title="Приблизить">🔍＋</button>` : ""}
       ${can("track_human") ? `<button class="act" data-px="track_human" title="Камера ведёт человека в кадре">👣 Следить за человеком</button>` : ""}
-      ${homeP && can("watch_stop") ? `<button class="act" data-px="watch_stop" title="Камера останется здесь">⏸ Не возвращаться</button>
-         <button class="act" data-px="watch_start">↩ Возвращать</button>` : ""}
+      ${homeP && can("watch_stop") ? (S.watch_active
+        ? `<button class="act" data-px="watch_stop" title="Камера останется здесь">⏸ Не возвращаться</button>`
+        : `<button class="act primary" data-px="watch_start">↩ Возвращать на «${esc(homeP.name || `Точка ${homeP.no}`)}»</button>`) : ""}
     </div>
-    <div class="sub">${homeP ? `Без действий камера через ${S.watch_time || 60} с сама возвращается на «${esc(homeP.name || `Точка ${homeP.no}`)}».`
+    <div class="sub">${homeP ? (S.watch_active
+        ? `Без действий камера через ${S.watch_time || 60} с сама возвращается на «${esc(homeP.name || `Точка ${homeP.no}`)}».`
+        : "Возврат выключен: камера остаётся там, куда её повернули.")
       : S.commands && S.commands.length ? "Возврат на исходную точку не настроен." : ""}</div>
     ${this._admin && P.edit && set.length && S.watch_modes && S.watch_modes.includes("Mode_Watch_Point") ? `<div class="phome">
       Исходная точка <select data-home>${['<option value="">— не возвращаться —</option>', ...set.map((p) =>
@@ -842,6 +845,10 @@ class RaySharpNvrPanel extends HTMLElement {
     box.querySelectorAll("[data-hold]").forEach((b) => this._hold(b, () => extra(b.dataset.hold, "Start"), () => extra(b.dataset.hold, "Stop")));
     box.querySelectorAll("[data-px]").forEach((b) => { b.onclick = async (ev) => {
       ev.stopPropagation(); b.disabled = true; await extra(b.dataset.px);
+      if (b.dataset.px.startsWith("watch_")) {
+        try { P.set = await this._hass.callWS({ type: "raysharp_nvr/ptz_settings", camera: ch.camera }); this._renderPresets(ch); } catch (e) { /* keep */ }
+        return;
+      }
       note.textContent = { track_human: "Камера ведёт человека в кадре", watch_stop: "Камера останется здесь, пока не нажмёте «Возвращать»", watch_start: "Камера вернётся на исходную точку" }[b.dataset.px] || "";
       b.disabled = false;
     }; });

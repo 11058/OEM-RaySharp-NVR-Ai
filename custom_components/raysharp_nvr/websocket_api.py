@@ -1087,7 +1087,19 @@ async def ws_ptz_settings(hass: HomeAssistant, connection, msg: dict) -> None:
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "failed", _ptz_err(err))
         return
-    connection.send_result(msg["id"], res)
+    connection.send_result(msg["id"], _with_home(hass, msg["camera"], res))
+
+
+def _with_home(hass: HomeAssistant, camera: str, res: dict) -> dict:
+    """Fill the idle-return preset from what we saved; active = camera is in watch mode now."""
+    r = _rules(hass)
+    home = (r.home.get(camera) if r else None) or {}
+    if home.get("no"):
+        res["watch_mode"] = "Mode_Watch_Point"
+        res["watch_num"] = home["no"]
+        res["watch_time"] = home.get("seconds", 60)
+    res["watch_active"] = res.get("cruise_mode") == "Mode_Watch_Mode"
+    return res
 
 
 @websocket_api.websocket_command(
@@ -1131,11 +1143,12 @@ async def ws_ptz_home(hass: HomeAssistant, connection, msg: dict) -> None:
         return
     try:
         await cam.coordinator.async_ptz_home(cam._channel_num, msg.get("no"), msg["seconds"])  # noqa: SLF001
+        _rules(hass).set_home(msg["camera"], msg.get("no"), msg["seconds"])
         res = await cam.coordinator.async_ptz_settings(cam._channel_num)  # noqa: SLF001
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "failed", _ptz_err(err))
         return
-    connection.send_result(msg["id"], res)
+    connection.send_result(msg["id"], _with_home(hass, msg["camera"], res))
 
 
 def _rules(hass: HomeAssistant):
