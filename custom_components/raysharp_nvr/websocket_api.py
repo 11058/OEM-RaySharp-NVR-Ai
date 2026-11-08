@@ -262,7 +262,7 @@ async def ws_action(hass: HomeAssistant, connection, msg: dict) -> None:
             await hass.services.async_call(
                 DOMAIN, "ptz_control",
                 {"config_entry_id": entry_id, "channel": msg["channel"],
-                 "command": msg["command"], "state": msg["state"], "speed": 50},
+                 "command": msg["command"], "state": msg["state"], "speed": 5},
                 blocking=True,
             )  # fmt: skip
         else:
@@ -1066,6 +1066,78 @@ async def ws_ptz_preset(hass: HomeAssistant, connection, msg: dict) -> None:
     connection.send_result(msg["id"], {"presets": cam.coordinator.ptz_presets.get(cam._channel_num, [])})  # noqa: SLF001
 
 
+def _ptz_err(err: Exception) -> str:
+    text = str(err)
+    if "no_permission" in text:
+        return "Регистратор не разрешает этой учётке PTZ: включите право «PTZ» в пользователях регистратора"
+    return text
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/ptz_settings", vol.Required("camera"): str}
+)
+@websocket_api.async_response
+async def ws_ptz_settings(hass: HomeAssistant, connection, msg: dict) -> None:
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    try:
+        res = await cam.coordinator.async_ptz_settings(cam._channel_num)  # noqa: SLF001
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "failed", _ptz_err(err))
+        return
+    connection.send_result(msg["id"], res)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/ptz_extra",
+        vol.Required("camera"): str,
+        vol.Required("what"): vol.In(["zoom_in", "zoom_out", "focus_near", "focus_far", "autofocus",
+                                      "track_human", "watch_start", "watch_stop"]),
+        vol.Optional("state", default="Start"): vol.In(["Start", "Stop"]),
+    }
+)
+@websocket_api.async_response
+async def ws_ptz_extra(hass: HomeAssistant, connection, msg: dict) -> None:
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    try:
+        await cam.coordinator.async_ptz_extra(cam._channel_num, msg["what"], msg["state"])  # noqa: SLF001
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "failed", _ptz_err(err))
+        return
+    connection.send_result(msg["id"], {"ok": True})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/ptz_home",
+        vol.Required("camera"): str,
+        vol.Optional("no"): vol.Any(None, vol.All(int, vol.Range(min=1, max=255))),
+        vol.Optional("seconds", default=60): vol.All(int, vol.Range(min=15, max=240)),
+    }
+)
+@websocket_api.async_response
+async def ws_ptz_home(hass: HomeAssistant, connection, msg: dict) -> None:
+    """Set (or switch off) the camera's own idle return to a preset."""
+    cam = _raysharp_camera(hass, msg["camera"])
+    if cam is None:
+        connection.send_error(msg["id"], "not_found", "Камера не найдена")
+        return
+    try:
+        await cam.coordinator.async_ptz_home(cam._channel_num, msg.get("no"), msg["seconds"])  # noqa: SLF001
+        res = await cam.coordinator.async_ptz_settings(cam._channel_num)  # noqa: SLF001
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "failed", _ptz_err(err))
+        return
+    connection.send_result(msg["id"], res)
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     from .av_view import RaySharpAvHlsView, RaySharpAvView  # noqa: PLC0415
@@ -1073,7 +1145,8 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     for handler in (ws_overview, ws_event_picture, ws_subscribe, ws_action, ws_clip,
                     ws_stream, ws_api, ws_probe_playback, ws_av, ws_timeline, ws_talk_probe,
                     ws_intercom_subscribe, ws_intercom_state, ws_intercom_answer, ws_intercom_hangup,
-                    ws_intercom_test_ring, ws_journal_clear, ws_ptz_presets, ws_ptz_preset):  # fmt: skip
+                    ws_intercom_test_ring, ws_journal_clear, ws_ptz_presets, ws_ptz_preset,
+                    ws_ptz_settings, ws_ptz_extra, ws_ptz_home):  # fmt: skip
         websocket_api.async_register_command(hass, handler)
     hass.http.register_view(RaySharpAvView(hass))
     hass.http.register_view(RaySharpAvHlsView(hass))

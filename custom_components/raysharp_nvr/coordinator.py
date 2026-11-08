@@ -681,13 +681,63 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         cmd = {"call": "Ptz_Cmd_CallPreset", "save": "Ptz_Cmd_AddPreset",
                "rename": "Ptz_PresetPoint_ChangeName", "clear": "Ptz_Cmd_ClearPreset"}[op]
-        payload: dict[str, Any] = {"channel": f"CH{channel}", "cmd": cmd, "speed": 50,
+        payload: dict[str, Any] = {"channel": f"CH{channel}", "cmd": cmd, "speed": 5,
                                    "preset_point_no": int(no)}
         if op in ("save", "rename"):
             payload["preset_point_name"] = name or f"Точка {no}"
         await self.client.async_api_call(API_PTZ_CONTROL, payload)
         if op != "call":
             await self.async_refresh_presets(channel)
+
+    # Commands from the camera's own PTZ menu the panel may send (PTZ/Range "cmd").
+    PTZ_EXTRA = {
+        "zoom_in": "Ptz_Cmd_ZoomAdd", "zoom_out": "Ptz_Cmd_ZoomMinus",
+        "focus_near": "Ptz_Cmd_FocusAdd", "focus_far": "Ptz_Cmd_FocusMinus",
+        "autofocus": "Ptz_QuickUse_AutoFocus",
+        "track_human": "Ptz_QuickUse_ManualHumanTrace",
+        "watch_start": "Ptz_QuickUse_WatchModeStart", "watch_stop": "Ptz_QuickUse_WatchModeStop",
+    }
+
+    async def async_ptz_settings(self, channel: int) -> dict[str, Any]:
+        """What the camera can do and how its idle return is set (PTZ/Range + Get)."""
+        from .const import API_PTZ_GET  # noqa: PLC0415
+
+        rng = self._extract_data(await self.client.async_api_call(
+            "/API/PreviewChannel/PTZ/Range", {"channel": f"CH{channel}"})) or {}
+        cur = self._extract_data(await self.client.async_api_call(API_PTZ_GET, {"channel": f"CH{channel}"})) or {}
+        cmds = set((rng.get("cmd") or {}).get("items") or [])
+        wm = rng.get("watch_mode_time") or {}
+        return {
+            "commands": sorted(k for k, v in self.PTZ_EXTRA.items() if v in cmds),
+            "watch_modes": (rng.get("watch_mode_mode") or {}).get("items") or [],
+            "watch_time_min": wm.get("min", 15), "watch_time_max": wm.get("max", 240),
+            "watch_mode": cur.get("watch_mode_mode"), "watch_num": cur.get("watch_mode_num"),
+            "watch_time": cur.get("watch_mode_time"),
+            "cruise_mode": cur.get("current_cruise_mode"),
+            "speed_max": (rng.get("speed") or {}).get("max", 10),
+        }
+
+    async def async_ptz_extra(self, channel: int, what: str, state: str = "Start") -> None:
+        from .const import API_PTZ_CONTROL  # noqa: PLC0415
+
+        payload: dict[str, Any] = {"channel": f"CH{channel}", "cmd": self.PTZ_EXTRA[what], "speed": 5}
+        if what in ("zoom_in", "zoom_out", "focus_near", "focus_far"):
+            payload["state"] = state  # held like the arrows
+        else:
+            payload["state"] = "Start"
+        await self.client.async_api_call(API_PTZ_CONTROL, payload)
+
+    async def async_ptz_home(self, channel: int, no: int | None, seconds: int) -> None:
+        """Idle return: after `seconds` without commands the camera goes to preset
+        `no` by itself (the camera's watch mode). no=None switches it off."""
+        from .const import API_PTZ_SET  # noqa: PLC0415
+
+        if no:
+            data = {"channel": f"CH{channel}", "watch_mode_mode": "Mode_Watch_Point",
+                    "watch_mode_num": int(no), "watch_mode_time": int(seconds)}
+        else:
+            data = {"channel": f"CH{channel}", "watch_mode_mode": "Mode_Default_Cruise"}
+        await self.client.async_api_call(API_PTZ_SET, data)
 
     async def _async_clock_loop(self) -> None:
         """The NVR's time zone every 5 minutes: someone may change it."""

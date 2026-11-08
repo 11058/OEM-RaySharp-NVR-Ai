@@ -668,8 +668,32 @@ class RaySharpNvrPanel extends HTMLElement {
       try { list = (await this._hass.callWS({ type: "raysharp_nvr/ptz_presets", camera: ch.camera })).presets; }
       catch (e) { box.innerHTML = `<div class="warnbar">⚠ Точки камеры не прочитаны: ${esc(e.message || e)}</div>`; return; }
     }
-    this._presets = { cam: ch.camera, list, edit: this._presets && this._presets.cam === ch.camera ? this._presets.edit : false };
+    this._presets = { cam: ch.camera, list, edit: this._presets && this._presets.cam === ch.camera ? this._presets.edit : false,
+      set: this._presets && this._presets.cam === ch.camera ? this._presets.set : null };
     this._renderPresets(ch);
+    if (!this._presets.set) {
+      this._hass.callWS({ type: "raysharp_nvr/ptz_settings", camera: ch.camera })
+        .then((r) => { if (this._presets && this._presets.cam === ch.camera) { this._presets.set = r; this._renderPresets(ch); } }, () => {});
+    }
+  }
+
+  // Hold-to-act for zoom / focus, like the arrows: Stop after Start, >= 400 ms.
+  _hold(b, start, stop) {
+    let run = null;
+    b.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      if (run) return;
+      try { b.setPointerCapture(ev.pointerId); } catch (e) { /* old browsers */ }
+      b.classList.add("on"); run = { t0: Date.now(), p: start() };
+    });
+    const up = async () => {
+      const r = run; run = null; b.classList.remove("on");
+      if (!r) return;
+      await r.p; setTimeout(stop, Math.max(0, 400 - (Date.now() - r.t0)));
+    };
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach((e) => b.addEventListener(e, up));
+    b.addEventListener("contextmenu", (ev) => ev.preventDefault());
+    b.onclick = (ev) => ev.stopPropagation();
   }
 
   _renderPresets(ch) {
@@ -689,14 +713,49 @@ class RaySharpNvrPanel extends HTMLElement {
            <button class="act primary" data-pop="save" data-no="${free.no}">＋ Запомнить текущее положение (№${free.no})</button></span>` : ""}
          <button class="act" data-pop="done">Готово</button>`
       : `<button class="act" data-pop="edit">✎ Точки…</button>`) : "";
+    // The camera's own extras: zoom, human tracking, idle return to the home preset.
+    const S = P.set || { commands: [] };
+    const can = (k) => (S.commands || []).includes(k);
+    const homeP = S.watch_mode === "Mode_Watch_Point" ? set.find((p) => p.no === S.watch_num) : null;
+    const extras = `<div class="pextra">
+      ${can("zoom_in") ? `<button class="act hold" data-hold="zoom_out" title="Отдалить">🔍−</button><button class="act hold" data-hold="zoom_in" title="Приблизить">🔍＋</button>` : ""}
+      ${can("track_human") ? `<button class="act" data-px="track_human" title="Камера ведёт человека в кадре">👣 Следить за человеком</button>` : ""}
+      ${homeP && can("watch_stop") ? `<button class="act" data-px="watch_stop" title="Камера останется здесь">⏸ Не возвращаться</button>
+         <button class="act" data-px="watch_start">↩ Возвращать</button>` : ""}
+    </div>
+    <div class="sub">${homeP ? `Без действий камера через ${S.watch_time || 60} с сама возвращается на «${esc(homeP.name || `Точка ${homeP.no}`)}».`
+      : S.commands && S.commands.length ? "Возврат на исходную точку не настроен." : ""}</div>
+    ${this._admin && P.edit && set.length && S.watch_modes && S.watch_modes.includes("Mode_Watch_Point") ? `<div class="phome">
+      Исходная точка <select data-home>${['<option value="">— не возвращаться —</option>', ...set.map((p) =>
+        `<option value="${p.no}" ${homeP && homeP.no === p.no ? "selected" : ""}>${esc(p.name || `Точка ${p.no}`)}</option>`)].join("")}</select>
+      через <input data-homesec type="number" min="${S.watch_time_min || 15}" max="${S.watch_time_max || 240}" value="${S.watch_time || 60}"> с
+      <button class="act primary" data-pop="home">Сохранить</button></div>` : ""}`;
     box.innerHTML = `<div class="plist">${chips || (P.edit ? "" : '<span class="sub">Точек ещё нет — поверните камеру и нажмите «✎ Точки…»</span>')}</div>
-      <div class="pfoot">${admin}</div>
+      <div class="pfoot">${admin}</div>${extras}
       <div class="sub pnote"></div>`;
     const note = box.querySelector(".pnote");
+    const extra = (what, state = "Start") => this._hass.callWS({ type: "raysharp_nvr/ptz_extra", camera: ch.camera, what, state })
+      .catch((e) => { note.textContent = `⚠ ${e.message || e}`; });
+    box.querySelectorAll("[data-hold]").forEach((b) => this._hold(b, () => extra(b.dataset.hold, "Start"), () => extra(b.dataset.hold, "Stop")));
+    box.querySelectorAll("[data-px]").forEach((b) => { b.onclick = async (ev) => {
+      ev.stopPropagation(); b.disabled = true; await extra(b.dataset.px);
+      note.textContent = { track_human: "Камера ведёт человека в кадре", watch_stop: "Камера останется здесь, пока не нажмёте «Возвращать»", watch_start: "Камера вернётся на исходную точку" }[b.dataset.px] || "";
+      b.disabled = false;
+    }; });
     box.querySelectorAll("[data-pop]").forEach((b) => { b.onclick = async (ev) => {
       ev.stopPropagation();
       const op = b.dataset.pop, no = Number(b.dataset.no);
       if (op === "edit" || op === "done") { P.edit = op === "edit"; this._renderPresets(ch); return; }
+      if (op === "home") {
+        const sel = box.querySelector("[data-home]"), sec = box.querySelector("[data-homesec]");
+        b.disabled = true; note.textContent = "Сохраняю в камере…";
+        try {
+          P.set = await this._hass.callWS({ type: "raysharp_nvr/ptz_home", camera: ch.camera,
+            no: sel.value ? Number(sel.value) : null, seconds: Number(sec.value) || 60 });
+          this._renderPresets(ch);
+        } catch (e) { note.textContent = `⚠ ${e.message || e}`; b.disabled = false; }
+        return;
+      }
       if (op === "clear" && b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Удалить?"; return; }
       const inp = box.querySelector(`[data-pname="${op === "save" && !P.list.find((p) => p.no === no && p.set) ? "new" : no}"]`);
       const name = inp ? inp.value.trim() : "";
@@ -1341,6 +1400,13 @@ const STYLE = `
     background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 15px; }
   .pchip.edit .act { padding: 8px 10px; font-size: 15px; }
   .pfoot .pchip.new { flex: 1 1 100%; }
+  .pextra { display:flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .pextra .act { padding: 10px 12px; font-size: 15px; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .pextra .act.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+  .phome { display:flex; flex-wrap: wrap; gap: 6px; align-items:center; margin-top: 8px; font-size: 14px; }
+  .phome select, .phome input { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--divider-color);
+    background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 14px; }
+  .phome input { width: 70px; }
   .act.danger { border-color: var(--error-color, #c62828); color: var(--error-color, #c62828); }
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }

@@ -766,7 +766,8 @@ async def _async_handle_ptz_control(hass: HomeAssistant, call: ServiceCall) -> N
     channel_num = call.data["channel"]
     command = call.data["command"]
     state = call.data.get("state", PTZ_STATE_START)
-    speed = call.data.get("speed", 50)
+    # PTZ speed: these cameras take 1..10 (PTZ/Range); older docs said 1..100.
+    speed = max(1, min(10, int(call.data.get("speed", 5))))
     preset_num = call.data.get("preset_num")
 
     payload: dict[str, Any] = {
@@ -1233,7 +1234,7 @@ PTZ_SERVICE_SCHEMA = vol.Schema(
         vol.Required("channel"): vol.All(int, vol.Range(min=1, max=64)),
         vol.Required("command"): cv.string,
         vol.Optional("state", default=PTZ_STATE_START): vol.In(["Start", "Stop"]),
-        vol.Optional("speed", default=50): vol.All(int, vol.Range(min=1, max=100)),
+        vol.Optional("speed", default=5): vol.All(int, vol.Range(min=1, max=100)),
         vol.Optional("preset_num"): vol.All(int, vol.Range(min=1, max=255)),
     }
 )

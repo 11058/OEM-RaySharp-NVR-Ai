@@ -110,6 +110,7 @@ API_EVENT_PUSH_SET = "/API/AlarmConfig/EventPush/Set"
 # ─── PTZ & Preview ────────────────────────────────────────────────────────────
 API_PTZ_CONTROL = "/API/PreviewChannel/PTZ/Control"
 API_PTZ_GET = "/API/PreviewChannel/PTZ/Get"
+API_PTZ_SET = "/API/PreviewChannel/PTZ/Set"
 API_MANUAL_ALARM_GET = "/API/PreviewChannel/ManualAlarm/Get"
 API_MANUAL_ALARM_SET = "/API/PreviewChannel/ManualAlarm/Set"
 API_FLOODLIGHT = "/API/PreviewChannel/Floodlight2AudioAlarm/Get"
