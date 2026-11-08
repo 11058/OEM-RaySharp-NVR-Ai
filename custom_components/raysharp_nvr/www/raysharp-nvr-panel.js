@@ -565,9 +565,10 @@ class RaySharpNvrPanel extends HTMLElement {
       ${!ch.online || ch.videoloss ? `<div class="warnbar">⚠ Камера ${ch.videoloss ? "потеряла видеосигнал" : "не в сети"} — потока нет, запись с неё сейчас не идёт.</div>` : ""}
       <div id="live" class="live"></div>
       ${mode === "archive" ? '<div id="tl" class="tl"></div>' : ""}
-      ${this._admin && ch.ptz ? `<div class="ptz" id="ptz">${PTZ.map(([l, c]) => c
-        ? `<button class="act" data-ptz="${c}" aria-label="${c.replace("Ptz_Cmd_", "")}">${l}</button>` : "<span></span>").join("")}</div>` : ""}
-      ${ch.ptz ? '<div id="presets" class="presets"><span class="sub">Точки камеры…</span></div>' : ""}
+      ${ch.ptz ? `<div class="ptzrow">
+        ${this._admin ? `<div class="ptz" id="ptz">${PTZ.map(([l, c]) => c
+          ? `<button class="act" data-ptz="${c}" aria-label="${c.replace("Ptz_Cmd_", "")}">${l}</button>` : "<span></span>").join("")}</div>` : ""}
+        <div id="presets" class="presets"><span class="sub">Точки камеры…</span></div></div>` : ""}
       <div id="info">${this._modalInfo(n, ch, act, evs)}</div></div></div>`;
     const live = host.querySelector("#live");
     const st = ch.camera && this._hass.states[ch.camera];
@@ -688,7 +689,8 @@ class RaySharpNvrPanel extends HTMLElement {
            <button class="act primary" data-pop="save" data-no="${free.no}">＋ Запомнить текущее положение (№${free.no})</button></span>` : ""}
          <button class="act" data-pop="done">Готово</button>`
       : `<button class="act" data-pop="edit">✎ Точки…</button>`) : "";
-    box.innerHTML = `<div class="hrow wrap">${chips || (P.edit ? "" : '<span class="sub">Точек ещё нет — поверните камеру и нажмите «✎ Точки…»</span>')}${admin}</div>
+    box.innerHTML = `<div class="plist">${chips || (P.edit ? "" : '<span class="sub">Точек ещё нет — поверните камеру и нажмите «✎ Точки…»</span>')}</div>
+      <div class="pfoot">${admin}</div>
       <div class="sub pnote"></div>`;
     const note = box.querySelector(".pnote");
     box.querySelectorAll("[data-pop]").forEach((b) => { b.onclick = async (ev) => {
@@ -1324,12 +1326,21 @@ const STYLE = `
   .ptz .act { padding: 12px 0; font-size: 20px; touch-action: none; user-select: none; -webkit-user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
   .ptz .act.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
-  .presets { margin-top: 10px; }
-  .presets .hrow { gap: 6px; }
-  .pchip.edit { display:inline-flex; gap: 4px; align-items:center; padding: 2px; border: 1px solid var(--divider-color); border-radius: 8px; }
-  .pchip.edit input { width: 150px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--divider-color);
-    background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 13px; }
-  .pchip.new input { width: 230px; }
+  /* Arrows on the left, the camera's presets as big buttons to the right; on a
+     narrow phone the presets drop under the arrows at full width. */
+  .ptzrow { display:flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; margin-top: 10px; }
+  .ptzrow .ptz { margin-top: 0; flex: none; }
+  .presets { flex: 1 1 180px; min-width: 0; }
+  .plist { display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .plist .pchip:not(.edit) { padding: 12px 10px; font-size: 15px; text-align: left; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; touch-action: manipulation; }
+  .pfoot { display:flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .pchip.edit { display:flex; gap: 4px; align-items:center; padding: 3px; border: 1px solid var(--divider-color); border-radius: 8px;
+    grid-column: 1 / -1; }
+  .pchip.edit input { flex: 1; min-width: 0; padding: 8px; border-radius: 6px; border: 1px solid var(--divider-color);
+    background: var(--secondary-background-color); color: var(--primary-text-color); font-size: 15px; }
+  .pchip.edit .act { padding: 8px 10px; font-size: 15px; }
+  .pfoot .pchip.new { flex: 1 1 100%; }
   .act.danger { border-color: var(--error-color, #c62828); color: var(--error-color, #c62828); }
   .evrow { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
   .evc img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; display:block; }
