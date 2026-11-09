@@ -49,6 +49,10 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
             [StaticPathConfig(f"{STATIC}/{card}", str(WWW / card), cache_headers=False)]
         )
         add_extra_js_url(hass, f"{STATIC}/{card}?v={version}")
+    # Also on every dashboard: the same page as a card (custom:raysharp-nvr-card).
+    from homeassistant.components.frontend import add_extra_js_url  # noqa: PLC0415
+
+    add_extra_js_url(hass, f"{STATIC}/{BUNDLE}?v={version}")
     await panel_custom.async_register_panel(
         hass,
         webcomponent_name="raysharp-nvr-panel",
