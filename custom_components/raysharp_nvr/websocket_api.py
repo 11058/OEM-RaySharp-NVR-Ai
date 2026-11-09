@@ -1098,7 +1098,8 @@ def _with_home(hass: HomeAssistant, camera: str, res: dict) -> dict:
         res["watch_mode"] = "Mode_Watch_Point"
         res["watch_num"] = home["no"]
         res["watch_time"] = home.get("seconds", 60)
-    res["watch_active"] = res.get("cruise_mode") == "Mode_Watch_Mode"
+    # Active = HA will bring it back (not paused); the camera's own mode is a bonus.
+    res["watch_active"] = bool(home.get("no")) and not home.get("paused")
     return res
 
 
@@ -1119,6 +1120,10 @@ async def ws_ptz_extra(hass: HomeAssistant, connection, msg: dict) -> None:
         return
     try:
         await cam.coordinator.async_ptz_extra(cam._channel_num, msg["what"], msg["state"])  # noqa: SLF001
+        if msg["what"] in ("watch_stop", "watch_start") and _rules(hass):
+            _rules(hass).set_paused(msg["camera"], msg["what"] == "watch_stop")
+            if msg["what"] == "watch_start":
+                cam.coordinator.note_ptz(cam._channel_num)  # noqa: SLF001 - count from now
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "failed", _ptz_err(err))
         return

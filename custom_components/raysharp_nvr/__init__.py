@@ -781,6 +781,8 @@ async def _async_handle_ptz_control(hass: HomeAssistant, call: ServiceCall) -> N
 
     try:
         await coordinator.client.async_api_call(API_PTZ_CONTROL, payload)
+        if state == "Stop" or command == "Ptz_Cmd_CallPreset":
+            coordinator.note_ptz(channel_num)
         _LOGGER.debug(
             "PTZ control sent: channel=%s cmd=%s speed=%s state=%s",
             channel_num,

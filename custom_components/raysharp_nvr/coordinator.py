@@ -676,10 +676,18 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cb(channel)
         return out
 
-    async def async_preset(self, channel: int, op: str, no: int, name: str = "") -> None:
+    def note_ptz(self, channel: int) -> None:
+        """Someone moved the camera: restart the idle-return countdown (ptz_rules)."""
+        from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+
+        async_dispatcher_send(self.hass, f"{DOMAIN}_ptz_activity", self, int(channel))
+
+    async def async_preset(self, channel: int, op: str, no: int, name: str = "", quiet: bool = False) -> None:
         """call / save / rename / clear one preset of a PTZ camera."""
         from .const import API_PTZ_CONTROL  # noqa: PLC0415
 
+        if op == "call" and not quiet:
+            self.note_ptz(channel)
         cmd = {"call": "Ptz_Cmd_CallPreset", "save": "Ptz_Cmd_AddPreset",
                "rename": "Ptz_PresetPoint_ChangeName", "clear": "Ptz_Cmd_ClearPreset"}[op]
         payload: dict[str, Any] = {"channel": f"CH{channel}", "cmd": cmd, "speed": 5,
@@ -722,6 +730,8 @@ class RaySharpNVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_ptz_extra(self, channel: int, what: str, state: str = "Start") -> None:
         from .const import API_PTZ_CONTROL  # noqa: PLC0415
 
+        if not what.startswith("watch_"):
+            self.note_ptz(channel)
         payload: dict[str, Any] = {"channel": f"CH{channel}", "cmd": self.PTZ_EXTRA[what], "speed": 5}
         if what in ("zoom_in", "zoom_out", "focus_near", "focus_far"):
             payload["state"] = state  # held like the arrows

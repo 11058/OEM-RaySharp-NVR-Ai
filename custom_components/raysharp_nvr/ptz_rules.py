@@ -19,7 +19,8 @@ import time
 from typing import Any
 
 from homeassistant.core import Event, HomeAssistant, callback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
@@ -42,12 +43,14 @@ class PtzRules:
         self.log: list[dict[str, Any]] = []  # last runs, for the panel
         # camera -> {"no", "seconds"}: the idle-return preset we set (PTZ/Get does not report it)
         self.home: dict[str, dict[str, Any]] = {}
+        self._timers: dict[str, Any] = {}
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
         self.rules = [r for r in data.get("rules", []) if isinstance(r, dict) and r.get("id")]
         self.home = data.get("home") or {}
         self._watch()
+        async_dispatcher_connect(self.hass, f"{DOMAIN}_ptz_activity", self._activity)
 
     def _save(self) -> None:
         self._store.async_delay_save(lambda: {"rules": self.rules, "home": self.home}, 2)
@@ -107,10 +110,61 @@ class PtzRules:
 
     def set_home(self, camera: str, no: int | None, seconds: int) -> None:
         if no:
-            self.home[camera] = {"no": int(no), "seconds": int(seconds)}
+            self.home[camera] = {"no": int(no), "seconds": int(seconds),
+                                 "paused": bool((self.home.get(camera) or {}).get("paused"))}
         else:
             self.home.pop(camera, None)
+            self._cancel(camera)
         self._save()
+
+    def set_paused(self, camera: str, paused: bool) -> None:
+        """«Не возвращаться» / «Возвращать»."""
+        if camera in self.home:
+            self.home[camera]["paused"] = paused
+            self._save()
+            if paused:
+                self._cancel(camera)
+
+    # --- idle return done by HA itself ------------------------------------------
+    # The camera's own watch mode is set too, but it did not bring CAM01 back on
+    # Береговая; HA counts the idle time after every move it sent and calls the
+    # home preset. Moves made from the NVR's own apps are not seen here.
+    def _cancel(self, camera: str) -> None:
+        t = self._timers.pop(camera, None)
+        if t:
+            t()
+
+    @callback
+    def _activity(self, coordinator, channel: int) -> None:
+        from .websocket_api import _raysharp_camera  # noqa: PLC0415
+
+        for camera, home in self.home.items():
+            cam = _raysharp_camera(self.hass, camera)
+            if cam is None or cam.coordinator is not coordinator or cam._channel_num != channel:  # noqa: SLF001
+                continue
+            self._cancel(camera)
+            if home.get("paused") or not home.get("no"):
+                return
+
+            @callback
+            def _fire(_now, camera=camera) -> None:
+                self._timers.pop(camera, None)
+                self.hass.async_create_task(self._go_home(camera))
+
+            self._timers[camera] = async_call_later(self.hass, int(home.get("seconds", 60)), _fire)
+            return
+
+    async def _go_home(self, camera: str) -> None:
+        from .websocket_api import _raysharp_camera  # noqa: PLC0415
+
+        home = self.home.get(camera) or {}
+        cam = _raysharp_camera(self.hass, camera)
+        if cam is None or home.get("paused") or not home.get("no"):
+            return
+        try:
+            await cam.coordinator.async_preset(cam._channel_num, "call", int(home["no"]), quiet=True)  # noqa: SLF001
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("PTZ idle return of %s failed: %s", camera, err)
 
     # --- editing ----------------------------------------------------------------
     def save_rule(self, rule: dict[str, Any]) -> dict[str, Any]:
