@@ -73,9 +73,11 @@ class RaySharpNVRConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 login_data = await client.async_login()
-            except RaySharpNVRAuthError:
+            except RaySharpNVRAuthError as err:
+                _LOGGER.warning("NVR login refused: %s", err)
                 errors["base"] = "invalid_auth"
-            except RaySharpNVRConnectionError:
+            except RaySharpNVRConnectionError as err:
+                _LOGGER.warning("NVR login failed: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception:
                 _LOGGER.exception("Unexpected exception during login")
@@ -122,9 +124,11 @@ class RaySharpNVRConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 await client.async_login()
-            except RaySharpNVRAuthError:
+            except RaySharpNVRAuthError as err:
+                _LOGGER.warning("NVR login refused: %s", err)
                 errors["base"] = "invalid_auth"
-            except RaySharpNVRConnectionError:
+            except RaySharpNVRConnectionError as err:
+                _LOGGER.warning("NVR login failed: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception:
                 _LOGGER.exception("Unexpected exception during reauth")
@@ -164,9 +168,11 @@ class RaySharpNVRConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.async_login()
-            except RaySharpNVRAuthError:
+            except RaySharpNVRAuthError as err:
+                _LOGGER.warning("NVR login refused: %s", err)
                 errors["base"] = "invalid_auth"
-            except RaySharpNVRConnectionError:
+            except RaySharpNVRConnectionError as err:
+                _LOGGER.warning("NVR login failed: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception:
                 _LOGGER.exception("Unexpected exception during reconfigure")

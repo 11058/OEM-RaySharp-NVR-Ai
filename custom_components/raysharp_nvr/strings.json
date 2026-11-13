@@ -32,8 +32,8 @@
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to the NVR. Please check the host and port.",
-      "invalid_auth": "Invalid authentication. Please check your username and password.",
+      "cannot_connect": "Could not connect to the NVR: no answer or an error answer. Check address and port; details in the HA log.",
+      "invalid_auth": "The NVR refused the login: wrong user name or password, or logins are blocked for a while after failed attempts (wait a minute). Details in the HA log.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {

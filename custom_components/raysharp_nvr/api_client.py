@@ -56,6 +56,23 @@ async def _error_reason(resp) -> str:
     return f" ({code}{': ' + reason if reason else ''})" if code or reason else ""
 
 
+def _reason_text(body: str) -> str:
+    """The NVR's refusal in a few words, e.g. "login_failed_or_block: ... (30 s)"."""
+    import json as _json  # noqa: PLC0415
+
+    try:
+        data = _json.loads(body)
+    except ValueError:
+        return body[:200] or "no details"
+    if not isinstance(data, dict):
+        return body[:200]
+    code = data.get("error_code") or ""
+    reason = data.get("reason") or ""
+    block = (data.get("data") or {}).get("block_remain_time") if isinstance(data.get("data"), dict) else None
+    text = ": ".join(x for x in (code, reason) if x) or body[:200]
+    return text + (f" (blocked for {block} s)" if block not in (None, "", "0") else "")
+
+
 def _raise_for_api_error(path: str, payload: Any) -> None:
     """Raise when a 200 response carries a failure envelope.
 
@@ -107,12 +124,19 @@ def _build_digest_header(
     uri: str,
     challenge: dict[str, str],
     nc: int,
+    userhash: bool | None = None,
 ) -> str:
-    """Build Authorization: Digest header value."""
+    """Build Authorization: Digest header value.
+
+    `userhash` None follows the challenge (RFC 7616); True/False forces it.
+    Firmware V8.1.0-20220418 (NVR-167R) advertises userhash="true" but only
+    finds the account by its plain name, so the client may force False.
+    """
     realm = challenge.get("realm", "")
     nonce = challenge.get("nonce", "")
     qop = challenge.get("qop", "")
-    use_userhash = challenge.get("userhash", "").lower() == "true"
+    advertised = challenge.get("userhash", "").lower() == "true"
+    use_userhash = advertised if userhash is None else userhash
 
     cnonce = os.urandom(16).hex()
     nc_str = f"{nc:08x}"
@@ -174,6 +198,8 @@ class RaySharpNVRClient:
         self._session_cookie: str | None = None
         self._authenticated = False
         self._nc = 0
+        # Learned at the first login: does this NVR really take a hashed name?
+        self._userhash: bool | None = None
         self._digest_challenge: dict[str, str] | None = None
         self._lock = asyncio.Lock()
         # Bumped on every successful login; lets parallel callers that hit a
@@ -234,38 +260,66 @@ class RaySharpNVRClient:
                 self._digest_challenge = _parse_digest_challenge(www_auth)
 
             # Step 2: Respond to challenge
-            self._nc += 1
-            auth_header = _build_digest_header(
-                self._username,
-                self._password,
-                "POST",
-                API_LOGIN,
-                self._digest_challenge,
-                self._nc,
+            advertised = self._digest_challenge.get("userhash", "").lower() == "true"
+            mode = self._userhash
+            status, body, resp_ok = await self._login_attempt(session, url, payload, timeout, mode)
+            if resp_ok is not None:
+                return resp_ok
+            if advertised and mode is not False and status in (400, 403):
+                # Advertised but not implemented (V8.1.0): the NVR cannot find
+                # the hashed name. Once more with the plain name, on a fresh
+                # challenge; remember what worked for later re-logins.
+                _LOGGER.warning(
+                    "NVR %s refused the hashed user name it asked for (%s %s); "
+                    "retrying with the plain name", self._host, status, body[:200],
+                )
+                async with session.post(url, json=payload, timeout=timeout) as resp:
+                    if resp.status == 401:
+                        self._digest_challenge = _parse_digest_challenge(
+                            resp.headers.get("WWW-Authenticate", "")
+                        )
+                status, body, resp_ok = await self._login_attempt(
+                    session, url, payload, timeout, False
+                )
+                if resp_ok is not None:
+                    return resp_ok
+            self._authenticated = False
+            if status == 401 or "login_failed" in body or "password" in body.lower():
+                raise RaySharpNVRAuthError(
+                    f"Authentication failed ({status}): {_reason_text(body)}"
+                )
+            raise RaySharpNVRConnectionError(
+                f"Login failed with status {status}: {_reason_text(body)}"
             )
-
-            async with session.post(
-                url,
-                json=payload,
-                headers={"Authorization": auth_header},
-                timeout=timeout,
-            ) as resp:
-                if resp.status == 401:
-                    self._authenticated = False
-                    raise RaySharpNVRAuthError(
-                        "Authentication failed: invalid credentials"
-                    )
-                if resp.status != 200:
-                    raise RaySharpNVRConnectionError(
-                        f"Login failed with status {resp.status}"
-                    )
-
-                return await self._handle_login_success(resp)
 
         except aiohttp.ClientError as err:
             raise RaySharpNVRConnectionError(
                 f"Connection to NVR failed: {err}"
             ) from err
+
+    async def _login_attempt(self, session, url, payload, timeout, userhash):
+        """One answer to the challenge: (status, body, login data or None)."""
+        self._nc += 1
+        auth_header = _build_digest_header(
+            self._username,
+            self._password,
+            "POST",
+            API_LOGIN,
+            self._digest_challenge,
+            self._nc,
+            userhash,
+        )
+        async with session.post(
+            url,
+            json=payload,
+            headers={"Authorization": auth_header},
+            timeout=timeout,
+        ) as resp:
+            if resp.status == 200:
+                if userhash is not None:
+                    self._userhash = userhash
+                return 200, "", await self._handle_login_success(resp)
+            return resp.status, await resp.text(), None
 
     async def _handle_login_success(
         self, resp: aiohttp.ClientResponse
